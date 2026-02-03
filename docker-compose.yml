@@ -14,6 +14,15 @@ services:
     # 环境变量配置
     environment:
       - JOBHISTORY_URL=${JOBHISTORY_URL:-http://host.docker.internal:19888/ws/v1/history}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FILE=/app/logs/jobhistory_mcp.log
+      - LOG_MAX_SIZE=${LOG_MAX_SIZE:-268435456}
+      - LOG_BACKUP_COUNT=${LOG_BACKUP_COUNT:-5}
+      - LOG_TO_STDERR=${LOG_TO_STDERR:-true}
+    
+    # 日志卷挂载（持久化日志）
+    volumes:
+      - ./logs:/app/logs
     
     # 如果需要网络访问宿主机的 Hadoop 集群
     # macOS/Windows 使用 host.docker.internal
@@ -37,7 +46,7 @@ services:
     # 标签
     labels:
       - "app=jobhistory-mcp"
-      - "version=1.0.0"
+      - "version=1.1.0"
 
   # 可选：用于测试的 Mock JobHistory Server
   # mock-jobhistory:

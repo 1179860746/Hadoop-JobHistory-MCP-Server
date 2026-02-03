@@ -179,12 +179,38 @@ docker run -i --rm \
 
 详细说明请参考 [Docker 部署指南](docs/DOCKER.md)
 
+## 日志配置
+
+日志系统记录工具调用和 REST 请求，支持滚动日志。
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `LOG_LEVEL` | `INFO` | 日志级别 (DEBUG/INFO/WARNING/ERROR) |
+| `LOG_FILE` | `./logs/jobhistory_mcp.log` | 日志文件路径 |
+| `LOG_MAX_SIZE` | `268435456` (256MB) | 单文件最大大小 |
+| `LOG_BACKUP_COUNT` | `5` | 保留文件数量 |
+| `LOG_TO_STDERR` | `true` | 是否输出到 stderr |
+
+### 日志示例
+
+```
+2024-01-15 10:30:45 | INFO  | a1b2c3d4 | [TOOL_CALL] jobhistory_list_jobs, params: {"limit": 10}
+2024-01-15 10:30:45 | INFO  | a1b2c3d4 | [REST_REQ] GET http://hadoop:19888/ws/v1/history/mapreduce/jobs?limit=10
+2024-01-15 10:30:46 | INFO  | a1b2c3d4 | [REST_RSP] 200 OK, size: 1523 bytes, duration: 856.23ms
+2024-01-15 10:30:46 | INFO  | a1b2c3d4 | [TOOL_RSP] success, size: 1856 bytes, duration: 892.45ms
+```
+
+详细说明请参考 [日志配置指南](docs/LOGGING.md)
+
 ## 文档
 
 - [REST API 文档](docs/REST_API.md) - JobHistory Server REST API 完整说明
 - [MCP 使用说明](docs/MCP_USAGE.md) - MCP Server 配置和使用指南
 - [代码详解](docs/CODE_EXPLANATION.md) - 代码结构和实现说明
 - [Docker 部署指南](docs/DOCKER.md) - Docker 构建和部署说明
+- [日志配置指南](docs/LOGGING.md) - 日志功能和配置说明
 
 ## 依赖
 

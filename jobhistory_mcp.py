@@ -15,20 +15,114 @@ JobHistory MCP Server - Hadoop MapReduce 作业历史查询服务
 
 环境变量:
     JOBHISTORY_URL: JobHistory Server 地址，默认 http://localhost:19888/ws/v1/history
+    LOG_LEVEL: 日志级别，默认 INFO
+    LOG_FILE: 日志文件路径，默认 ./logs/jobhistory_mcp.log
+    LOG_MAX_SIZE: 单个日志文件最大大小（字节），默认 268435456 (256MB)
+    LOG_BACKUP_COUNT: 保留的日志文件数量，默认 5
+    LOG_TO_STDERR: 是否输出到 stderr，默认 true
 
 作者: Winston
-版本: 1.0.0
+版本: 1.1.0
 """
 
 import json
 import os
-from typing import Optional, List, Dict, Any
+import sys
+import time
+import uuid
+import logging
+import functools
+from logging.handlers import RotatingFileHandler
+from typing import Optional, List, Dict, Any, Callable
 from enum import Enum
 from datetime import datetime
+from contextvars import ContextVar
+from pathlib import Path
 
 import httpx
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 from mcp.server.fastmcp import FastMCP
+
+# ==============================================================================
+# 日志配置
+# ==============================================================================
+
+# 请求 ID 上下文变量，用于关联同一请求的所有日志
+request_id_var: ContextVar[str] = ContextVar('request_id', default='-')
+
+
+class RequestIdFilter(logging.Filter):
+    """日志过滤器，为每条日志添加请求 ID"""
+    
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = request_id_var.get()
+        return True
+
+
+def setup_logging() -> logging.Logger:
+    """
+    配置日志系统
+    
+    支持滚动日志，同时输出到文件和 stderr。
+    注意：MCP stdio 模式使用 stdout 进行协议通信，
+    因此日志只能输出到 stderr 或文件。
+    
+    Returns:
+        logging.Logger: 配置好的日志记录器
+    """
+    # 从环境变量读取配置
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_file = os.getenv("LOG_FILE", "./logs/jobhistory_mcp.log")
+    log_max_size = int(os.getenv("LOG_MAX_SIZE", 268435456))  # 256MB
+    log_backup_count = int(os.getenv("LOG_BACKUP_COUNT", 5))
+    log_to_stderr = os.getenv("LOG_TO_STDERR", "true").lower() == "true"
+    
+    # 创建日志记录器
+    logger = logging.getLogger("jobhistory_mcp")
+    logger.setLevel(getattr(logging, log_level, logging.INFO))
+    
+    # 清除已有的处理器（避免重复添加）
+    logger.handlers.clear()
+    
+    # 日志格式
+    log_format = logging.Formatter(
+        fmt='%(asctime)s | %(levelname)-5s | %(request_id)s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # 添加请求 ID 过滤器
+    request_id_filter = RequestIdFilter()
+    
+    # 文件处理器（滚动日志）
+    try:
+        log_dir = Path(log_file).parent
+        log_dir.mkdir(parents=True, exist_ok=True)
+        
+        file_handler = RotatingFileHandler(
+            filename=log_file,
+            maxBytes=log_max_size,
+            backupCount=log_backup_count,
+            encoding='utf-8'
+        )
+        file_handler.setFormatter(log_format)
+        file_handler.addFilter(request_id_filter)
+        logger.addHandler(file_handler)
+    except Exception as e:
+        # 如果无法创建日志文件，输出警告到 stderr
+        print(f"警告：无法创建日志文件 {log_file}: {e}", file=sys.stderr)
+    
+    # stderr 处理器
+    if log_to_stderr:
+        stderr_handler = logging.StreamHandler(sys.stderr)
+        stderr_handler.setFormatter(log_format)
+        stderr_handler.addFilter(request_id_filter)
+        logger.addHandler(stderr_handler)
+    
+    return logger
+
+
+# 初始化日志
+logger = setup_logging()
 
 # ==============================================================================
 # 配置常量
@@ -41,7 +135,101 @@ JOBHISTORY_BASE_URL = os.getenv(
 )
 
 # HTTP 请求超时时间（秒）
-REQUEST_TIMEOUT = 30.0
+REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "30.0"))
+
+# 启动日志
+logger.info(f"JobHistory MCP Server 初始化")
+logger.info(f"JobHistory URL: {JOBHISTORY_BASE_URL}")
+logger.info(f"请求超时: {REQUEST_TIMEOUT}s")
+
+# ==============================================================================
+# 日志装饰器
+# ==============================================================================
+
+
+def log_tool_call(func: Callable) -> Callable:
+    """
+    工具调用日志装饰器
+    
+    记录 MCP 工具的调用信息，包括：
+    - 工具名称和参数
+    - 执行时间
+    - 成功或失败状态
+    
+    Args:
+        func: 被装饰的工具函数
+        
+    Returns:
+        装饰后的函数
+    """
+    @functools.wraps(func)
+    async def wrapper(params=None):
+        # 生成请求 ID
+        req_id = str(uuid.uuid4())[:8]
+        request_id_var.set(req_id)
+        
+        # 记录请求
+        tool_name = func.__name__
+        params_str = _safe_serialize_params(params)
+        logger.info(f"[TOOL_CALL] {tool_name}, params: {params_str}")
+        
+        start_time = time.time()
+        try:
+            # 执行工具函数
+            result = await func(params) if params is not None else await func()
+            
+            # 记录成功响应
+            duration_ms = (time.time() - start_time) * 1000
+            result_size = len(result) if isinstance(result, str) else 0
+            logger.info(f"[TOOL_RSP] success, size: {result_size} bytes, duration: {duration_ms:.2f}ms")
+            
+            return result
+            
+        except Exception as e:
+            # 记录错误
+            duration_ms = (time.time() - start_time) * 1000
+            logger.error(f"[TOOL_ERR] {type(e).__name__}: {str(e)}, duration: {duration_ms:.2f}ms")
+            raise
+    
+    return wrapper
+
+
+def _safe_serialize_params(params) -> str:
+    """
+    安全地序列化参数用于日志记录
+    
+    对敏感信息进行脱敏处理，限制长度避免日志过大。
+    
+    Args:
+        params: Pydantic 模型或其他参数对象
+        
+    Returns:
+        JSON 格式的参数字符串
+    """
+    if params is None:
+        return "{}"
+    
+    try:
+        if hasattr(params, 'model_dump'):
+            # Pydantic v2 模型
+            data = params.model_dump()
+        elif hasattr(params, 'dict'):
+            # Pydantic v1 模型
+            data = params.dict()
+        else:
+            data = str(params)
+            
+        # 转换为 JSON 字符串
+        result = json.dumps(data, ensure_ascii=False, default=str)
+        
+        # 限制长度
+        if len(result) > 500:
+            result = result[:500] + "..."
+            
+        return result
+    except Exception:
+        return "<序列化失败>"
+
 
 # ==============================================================================
 # 初始化 MCP Server
@@ -414,6 +602,7 @@ async def _make_request(endpoint: str, params: Dict[str, Any] = None) -> Dict[st
     - HTTP 客户端创建和管理
     - 请求超时处理
     - JSON 响应解析
+    - 请求和响应日志记录
     
     Args:
         endpoint: API 端点路径（相对于 JOBHISTORY_BASE_URL）
@@ -427,15 +616,55 @@ async def _make_request(endpoint: str, params: Dict[str, Any] = None) -> Dict[st
         httpx.TimeoutException: 请求超时
         httpx.ConnectError: 连接失败
     """
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            f"{JOBHISTORY_BASE_URL}/{endpoint}",
-            params=params,
-            timeout=REQUEST_TIMEOUT,
-            headers={"Accept": "application/json"}
+    url = f"{JOBHISTORY_BASE_URL}/{endpoint}"
+    params_str = "&".join(f"{k}={v}" for k, v in (params or {}).items())
+    full_url = f"{url}?{params_str}" if params_str else url
+    
+    # 记录请求
+    logger.info(f"[REST_REQ] GET {full_url}")
+    
+    start_time = time.time()
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                url,
+                params=params,
+                timeout=REQUEST_TIMEOUT,
+                headers={"Accept": "application/json"}
+            )
+            
+            # 计算响应时间
+            duration_ms = (time.time() - start_time) * 1000
+            response_size = len(response.content)
+            
+            # 记录响应
+            logger.info(
+                f"[REST_RSP] {response.status_code} {response.reason_phrase}, "
+                f"size: {response_size} bytes, duration: {duration_ms:.2f}ms"
+            )
+            
+            response.raise_for_status()
+            return response.json()
+            
+    except httpx.HTTPStatusError as e:
+        duration_ms = (time.time() - start_time) * 1000
+        logger.warning(
+            f"[REST_ERR] HTTP {e.response.status_code}, "
+            f"duration: {duration_ms:.2f}ms"
         )
-        response.raise_for_status()
-        return response.json()
+        raise
+    except httpx.TimeoutException as e:
+        duration_ms = (time.time() - start_time) * 1000
+        logger.warning(f"[REST_ERR] Timeout after {duration_ms:.2f}ms")
+        raise
+    except httpx.ConnectError as e:
+        duration_ms = (time.time() - start_time) * 1000
+        logger.warning(f"[REST_ERR] Connection failed: {e}, duration: {duration_ms:.2f}ms")
+        raise
+    except Exception as e:
+        duration_ms = (time.time() - start_time) * 1000
+        logger.error(f"[REST_ERR] {type(e).__name__}: {e}, duration: {duration_ms:.2f}ms")
+        raise
 
 
 def _handle_error(e: Exception) -> str:
@@ -591,6 +820,7 @@ def _format_counters_markdown(counters_data: Dict[str, Any], title: str = "计�
 # ==============================================================================
 
 
+@log_tool_call
 @mcp.tool(
     name="jobhistory_get_info",
     annotations={
@@ -637,6 +867,7 @@ async def jobhistory_get_info() -> str:
         return _handle_error(e)
 
 
+@log_tool_call
 @mcp.tool(
     name="jobhistory_list_jobs",
     annotations={
@@ -751,6 +982,7 @@ async def jobhistory_list_jobs(params: ListJobsInput) -> str:
         return _handle_error(e)
 
 
+@log_tool_call
 @mcp.tool(
     name="jobhistory_get_job",
     annotations={
@@ -859,6 +1091,7 @@ async def jobhistory_get_job(params: GetJobInput) -> str:
         return _handle_error(e)
 
 
+@log_tool_call
 @mcp.tool(
     name="jobhistory_get_job_counters",
     annotations={
@@ -901,6 +1134,7 @@ async def jobhistory_get_job_counters(params: GetJobCountersInput) -> str:
         return _handle_error(e)
 
 
+@log_tool_call
 @mcp.tool(
     name="jobhistory_get_job_conf",
     annotations={
@@ -983,6 +1217,7 @@ async def jobhistory_get_job_conf(params: GetJobConfInput) -> str:
         return _handle_error(e)
 
 
+@log_tool_call
 @mcp.tool(
     name="jobhistory_get_job_attempts",
     annotations={
@@ -1046,6 +1281,7 @@ async def jobhistory_get_job_attempts(params: GetJobAttemptsInput) -> str:
         return _handle_error(e)
 
 
+@log_tool_call
 @mcp.tool(
     name="jobhistory_list_tasks",
     annotations={
@@ -1134,6 +1370,7 @@ async def jobhistory_list_tasks(params: ListTasksInput) -> str:
         return _handle_error(e)
 
 
+@log_tool_call
 @mcp.tool(
     name="jobhistory_get_task",
     annotations={
@@ -1192,6 +1429,7 @@ async def jobhistory_get_task(params: GetTaskInput) -> str:
         return _handle_error(e)
 
 
+@log_tool_call
 @mcp.tool(
     name="jobhistory_get_task_counters",
     annotations={
@@ -1230,6 +1468,7 @@ async def jobhistory_get_task_counters(params: GetTaskCountersInput) -> str:
         return _handle_error(e)
 
 
+@log_tool_call
 @mcp.tool(
     name="jobhistory_list_task_attempts",
     annotations={
@@ -1307,6 +1546,7 @@ async def jobhistory_list_task_attempts(params: ListTaskAttemptsInput) -> str:
         return _handle_error(e)
 
 
+@log_tool_call
 @mcp.tool(
     name="jobhistory_get_task_attempt",
     annotations={
@@ -1394,6 +1634,7 @@ async def jobhistory_get_task_attempt(params: GetTaskAttemptInput) -> str:
         return _handle_error(e)
 
 
+@log_tool_call
 @mcp.tool(
     name="jobhistory_get_task_attempt_counters",
     annotations={
