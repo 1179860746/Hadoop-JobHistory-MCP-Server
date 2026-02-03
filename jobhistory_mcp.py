@@ -1,0 +1,1440 @@
+#!/usr/bin/env python3
+"""
+JobHistory MCP Server - Hadoop MapReduce 作业历史查询服务
+
+该 MCP Server 封装了 Hadoop JobHistory Server 的 REST API，
+提供工具来查询 MapReduce 作业历史信息，包括：
+- 作业列表查询（支持过滤和分页）
+- 作业详情查询
+- 作业计数器查询
+- 作业配置查询
+- 任务列表和详情查询
+- 任务尝试信息查询
+
+使用 FastMCP 框架构建，支持 Pydantic v2 输入验证。
+
+环境变量:
+    JOBHISTORY_URL: JobHistory Server 地址，默认 http://localhost:19888/ws/v1/history
+
+作者: Winston
+版本: 1.0.0
+"""
+
+import json
+import os
+from typing import Optional, List, Dict, Any
+from enum import Enum
+from datetime import datetime
+
+import httpx
+from pydantic import BaseModel, Field, ConfigDict, field_validator
+from mcp.server.fastmcp import FastMCP
+
+# ==============================================================================
+# 配置常量
+# ==============================================================================
+
+# JobHistory Server 地址，可通过环境变量配置
+JOBHISTORY_BASE_URL = os.getenv(
+    "JOBHISTORY_URL",
+    "http://localhost:19888/ws/v1/history"
+)
+
+# HTTP 请求超时时间（秒）
+REQUEST_TIMEOUT = 30.0
+
+# ==============================================================================
+# 初始化 MCP Server
+# ==============================================================================
+
+mcp = FastMCP("jobhistory_mcp")
+
+# ==============================================================================
+# 枚举类型定义
+# ==============================================================================
+
+
+class ResponseFormat(str, Enum):
+    """
+    响应格式枚举
+    
+    - MARKDOWN: 人类可读的 Markdown 格式，适合直接展示
+    - JSON: 机器可读的 JSON 格式，适合程序处理
+    """
+    MARKDOWN = "markdown"
+    JSON = "json"
+
+
+class JobState(str, Enum):
+    """
+    作业状态枚举
+    
+    MapReduce 作业的生命周期状态：
+    - NEW: 新建
+    - INITED: 已初始化
+    - RUNNING: 运行中
+    - SUCCEEDED: 成功完成
+    - FAILED: 失败
+    - KILL_WAIT: 等待终止
+    - KILLED: 已终止
+    - ERROR: 错误
+    """
+    NEW = "NEW"
+    INITED = "INITED"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    KILL_WAIT = "KILL_WAIT"
+    KILLED = "KILLED"
+    ERROR = "ERROR"
+
+
+class TaskType(str, Enum):
+    """
+    任务类型枚举
+    
+    MapReduce 任务类型：
+    - MAP: Map 任务（m）
+    - REDUCE: Reduce 任务（r）
+    """
+    MAP = "m"
+    REDUCE = "r"
+
+
+class TaskState(str, Enum):
+    """
+    任务状态枚举
+    
+    任务的生命周期状态：
+    - NEW: 新建
+    - SCHEDULED: 已调度
+    - RUNNING: 运行中
+    - SUCCEEDED: 成功
+    - FAILED: 失败
+    - KILL_WAIT: 等待终止
+    - KILLED: 已终止
+    """
+    NEW = "NEW"
+    SCHEDULED = "SCHEDULED"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    KILL_WAIT = "KILL_WAIT"
+    KILLED = "KILLED"
+
+
+# ==============================================================================
+# Pydantic 输入模型定义
+# ==============================================================================
+
+
+class ListJobsInput(BaseModel):
+    """
+    列出作业的输入参数模型
+    
+    用于 jobhistory_list_jobs 工具，支持多种过滤条件和分页。
+    
+    Attributes:
+        user: 按用户名过滤
+        state: 按作业状态过滤
+        queue: 按队列名过滤
+        limit: 返回结果数量限制（1-100）
+        started_time_begin: 开始时间范围的起点（毫秒时间戳）
+        started_time_end: 开始时间范围的终点（毫秒时间戳）
+        finished_time_begin: 结束时间范围的起点（毫秒时间戳）
+        finished_time_end: 结束时间范围的终点（毫秒时间戳）
+        response_format: 响应格式（markdown 或 json）
+    """
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        validate_assignment=True
+    )
+
+    user: Optional[str] = Field(
+        default=None,
+        description="按用户名过滤作业，例如 'hadoop'"
+    )
+    state: Optional[JobState] = Field(
+        default=None,
+        description="按作业状态过滤，可选值: NEW, INITED, RUNNING, SUCCEEDED, FAILED, KILLED"
+    )
+    queue: Optional[str] = Field(
+        default=None,
+        description="按队列名过滤，例如 'default'"
+    )
+    limit: Optional[int] = Field(
+        default=20,
+        ge=1,
+        le=100,
+        description="返回的最大作业数量，范围 1-100，默认 20"
+    )
+    started_time_begin: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="作业开始时间的起点（毫秒时间戳），用于时间范围查询"
+    )
+    started_time_end: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="作业开始时间的终点（毫秒时间戳），用于时间范围查询"
+    )
+    finished_time_begin: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="作业结束时间的起点（毫秒时间戳），用于时间范围查询"
+    )
+    finished_time_end: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="作业结束时间的终点（毫秒时间戳），用于时间范围查询"
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="输出格式: 'markdown' 人类可读格式，'json' 机器可读格式"
+    )
+
+
+class GetJobInput(BaseModel):
+    """
+    获取作业详情的输入参数模型
+    
+    用于 jobhistory_get_job 工具。
+    
+    Attributes:
+        job_id: MapReduce 作业 ID
+        response_format: 响应格式
+    """
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    job_id: str = Field(
+        ...,
+        description="作业ID，格式如 'job_1326381300833_2_2'",
+        min_length=1,
+        max_length=100
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="输出格式"
+    )
+
+    @field_validator('job_id')
+    @classmethod
+    def validate_job_id(cls, v: str) -> str:
+        """验证作业 ID 格式"""
+        if not v.strip():
+            raise ValueError("作业 ID 不能为空")
+        return v.strip()
+
+
+class GetJobCountersInput(BaseModel):
+    """
+    获取作业计数器的输入参数模型
+    
+    用于 jobhistory_get_job_counters 工具。
+    """
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    job_id: str = Field(
+        ...,
+        description="作业ID",
+        min_length=1
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="输出格式"
+    )
+
+
+class GetJobConfInput(BaseModel):
+    """
+    获取作业配置的输入参数模型
+    
+    用于 jobhistory_get_job_conf 工具。
+    """
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    job_id: str = Field(
+        ...,
+        description="作业ID",
+        min_length=1
+    )
+    filter_key: Optional[str] = Field(
+        default=None,
+        description="按配置键名过滤，支持部分匹配，例如 'mapreduce'"
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="输出格式"
+    )
+
+
+class GetJobAttemptsInput(BaseModel):
+    """
+    获取作业尝试列表的输入参数模型
+    
+    用于 jobhistory_get_job_attempts 工具。
+    """
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    job_id: str = Field(
+        ...,
+        description="作业ID",
+        min_length=1
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="输出格式"
+    )
+
+
+class ListTasksInput(BaseModel):
+    """
+    列出任务的输入参数模型
+    
+    用于 jobhistory_list_tasks 工具。
+    
+    Attributes:
+        job_id: 所属作业 ID
+        task_type: 任务类型过滤（Map 或 Reduce）
+        response_format: 响应格式
+    """
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    job_id: str = Field(
+        ...,
+        description="作业ID",
+        min_length=1
+    )
+    task_type: Optional[TaskType] = Field(
+        default=None,
+        description="任务类型: 'm' 表示 Map 任务，'r' 表示 Reduce 任务"
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="输出格式"
+    )
+
+
+class GetTaskInput(BaseModel):
+    """
+    获取任务详情的输入参数模型
+    
+    用于 jobhistory_get_task 工具。
+    """
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    job_id: str = Field(
+        ...,
+        description="作业ID",
+        min_length=1
+    )
+    task_id: str = Field(
+        ...,
+        description="任务ID，格式如 'task_1326381300833_2_2_m_0'",
+        min_length=1
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="输出格式"
+    )
+
+
+class GetTaskCountersInput(BaseModel):
+    """
+    获取任务计数器的输入参数模型
+    """
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    job_id: str = Field(..., description="作业ID", min_length=1)
+    task_id: str = Field(..., description="任务ID", min_length=1)
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="输出格式"
+    )
+
+
+class ListTaskAttemptsInput(BaseModel):
+    """
+    列出任务尝试的输入参数模型
+    """
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    job_id: str = Field(..., description="作业ID", min_length=1)
+    task_id: str = Field(..., description="任务ID", min_length=1)
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="输出格式"
+    )
+
+
+class GetTaskAttemptInput(BaseModel):
+    """
+    获取任务尝试详情的输入参数模型
+    """
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    job_id: str = Field(..., description="作业ID", min_length=1)
+    task_id: str = Field(..., description="任务ID", min_length=1)
+    attempt_id: str = Field(
+        ...,
+        description="尝试ID，格式如 'attempt_1326381300833_2_2_m_0_0'",
+        min_length=1
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="输出格式"
+    )
+
+
+class GetTaskAttemptCountersInput(BaseModel):
+    """
+    获取任务尝试计数器的输入参数模型
+    """
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    job_id: str = Field(..., description="作业ID", min_length=1)
+    task_id: str = Field(..., description="任务ID", min_length=1)
+    attempt_id: str = Field(..., description="尝试ID", min_length=1)
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="输出格式"
+    )
+
+
+# ==============================================================================
+# 工具函数（内部使用）
+# ==============================================================================
+
+
+async def _make_request(endpoint: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    发送 HTTP GET 请求到 JobHistory Server
+    
+    这是所有 API 调用的基础函数，封装了：
+    - HTTP 客户端创建和管理
+    - 请求超时处理
+    - JSON 响应解析
+    
+    Args:
+        endpoint: API 端点路径（相对于 JOBHISTORY_BASE_URL）
+        params: 查询参数字典
+        
+    Returns:
+        解析后的 JSON 响应数据
+        
+    Raises:
+        httpx.HTTPStatusError: HTTP 错误状态码
+        httpx.TimeoutException: 请求超时
+        httpx.ConnectError: 连接失败
+    """
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{JOBHISTORY_BASE_URL}/{endpoint}",
+            params=params,
+            timeout=REQUEST_TIMEOUT,
+            headers={"Accept": "application/json"}
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+def _handle_error(e: Exception) -> str:
+    """
+    统一错误处理函数
+    
+    将各种异常转换为用户友好的错误消息，
+    提供明确的错误原因和解决建议。
+    
+    Args:
+        e: 捕获的异常
+        
+    Returns:
+        格式化的错误消息字符串
+    """
+    if isinstance(e, httpx.HTTPStatusError):
+        status_code = e.response.status_code
+        if status_code == 404:
+            return "错误：资源未找到。请检查 ID 是否正确，或者该作业/任务可能已被清理。"
+        elif status_code == 403:
+            return "错误：权限不足，无法访问该资源。请检查访问权限配置。"
+        elif status_code == 401:
+            return "错误：认证失败。如果启用了安全模式，请检查认证配置。"
+        elif status_code == 500:
+            return "错误：服务器内部错误。请检查 JobHistory Server 日志。"
+        elif status_code == 503:
+            return "错误：服务暂时不可用。JobHistory Server 可能正在启动或过载。"
+        return f"错误：API 请求失败，HTTP 状态码 {status_code}。"
+    elif isinstance(e, httpx.TimeoutException):
+        return f"错误：请求超时（{REQUEST_TIMEOUT}秒）。请检查网络连接或增加超时时间。"
+    elif isinstance(e, httpx.ConnectError):
+        return f"错误：无法连接到 JobHistory Server ({JOBHISTORY_BASE_URL})。\n请检查：\n1. 服务是否已启动\n2. 地址和端口是否正确\n3. 网络是否可达"
+    return f"错误：{type(e).__name__} - {str(e)}"
+
+
+def _format_timestamp(ms: int) -> str:
+    """
+    将毫秒时间戳转换为人类可读格式
+    
+    Args:
+        ms: 毫秒时间戳（自 1970-01-01 00:00:00 UTC）
+        
+    Returns:
+        格式化的时间字符串，如 "2024-01-15 10:30:45"
+        如果时间戳无效，返回 "N/A"
+    """
+    if not ms or ms <= 0:
+        return "N/A"
+    try:
+        return datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, OSError):
+        return "N/A"
+
+
+def _format_duration(ms: int) -> str:
+    """
+    将毫秒时长转换为人类可读格式
+    
+    Args:
+        ms: 毫秒数
+        
+    Returns:
+        格式化的时长字符串，如 "2时30分15秒"
+    """
+    if not ms or ms <= 0:
+        return "N/A"
+    
+    seconds = ms // 1000
+    if seconds < 60:
+        return f"{seconds}秒"
+    elif seconds < 3600:
+        minutes = seconds // 60
+        secs = seconds % 60
+        return f"{minutes}分{secs}秒"
+    else:
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        secs = seconds % 60
+        return f"{hours}时{minutes}分{secs}秒"
+
+
+def _format_bytes(bytes_value: int) -> str:
+    """
+    将字节数转换为人类可读格式
+    
+    Args:
+        bytes_value: 字节数
+        
+    Returns:
+        格式化的大小字符串，如 "1.5 GB"
+    """
+    if not bytes_value or bytes_value < 0:
+        return "0 B"
+    
+    units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+    unit_index = 0
+    value = float(bytes_value)
+    
+    while value >= 1024 and unit_index < len(units) - 1:
+        value /= 1024
+        unit_index += 1
+    
+    if unit_index == 0:
+        return f"{int(value)} {units[unit_index]}"
+    return f"{value:.2f} {units[unit_index]}"
+
+
+def _format_counters_markdown(counters_data: Dict[str, Any], title: str = "计数器") -> str:
+    """
+    将计数器数据格式化为 Markdown
+    
+    Args:
+        counters_data: 计数器数据字典
+        title: 标题
+        
+    Returns:
+        Markdown 格式的计数器信息
+    """
+    lines = [f"# {title}", ""]
+    
+    counter_groups = counters_data.get("counterGroup", [])
+    if not counter_groups:
+        counter_groups = counters_data.get("taskCounterGroup", [])
+    if not counter_groups:
+        counter_groups = counters_data.get("taskAttemptCounterGroup", [])
+    
+    for group in counter_groups:
+        group_name = group.get("counterGroupName", "Unknown Group")
+        # 简化组名显示
+        short_name = group_name.split(".")[-1] if "." in group_name else group_name
+        lines.append(f"## {short_name}")
+        lines.append("")
+        
+        counters = group.get("counter", [])
+        for counter in counters:
+            name = counter.get("name", "Unknown")
+            # 尝试获取不同类型的值
+            total_value = counter.get("totalCounterValue", counter.get("value", 0))
+            map_value = counter.get("mapCounterValue")
+            reduce_value = counter.get("reduceCounterValue")
+            
+            if map_value is not None and reduce_value is not None:
+                lines.append(f"- **{name}**: {total_value:,} (Map: {map_value:,}, Reduce: {reduce_value:,})")
+            else:
+                lines.append(f"- **{name}**: {total_value:,}")
+        lines.append("")
+    
+    return "\n".join(lines)
+
+
+# ==============================================================================
+# MCP 工具定义
+# ==============================================================================
+
+
+@mcp.tool(
+    name="jobhistory_get_info",
+    annotations={
+        "title": "获取 History Server 信息",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def jobhistory_get_info() -> str:
+    """
+    获取 Hadoop JobHistory Server 的基本信息。
+    
+    返回服务器启动时间、Hadoop 版本、构建信息等。
+    这是一个简单的健康检查工具，可以验证服务是否可用。
+    
+    Returns:
+        str: Markdown 格式的服务器信息
+        
+    Example:
+        使用此工具检查 JobHistory Server 是否正常运行。
+    """
+    try:
+        data = await _make_request("info")
+        info = data.get("historyInfo", {})
+        
+        result = f"""# JobHistory Server 信息
+
+## 服务状态
+- **启动时间**: {_format_timestamp(info.get('startedOn', 0))}
+- **运行状态**: 正常
+
+## Hadoop 版本信息
+- **版本**: {info.get('hadoopVersion', 'N/A')}
+- **构建版本**: {info.get('hadoopBuildVersion', 'N/A')}
+- **构建时间**: {info.get('hadoopVersionBuiltOn', 'N/A')}
+
+## 连接信息
+- **服务地址**: {JOBHISTORY_BASE_URL}
+"""
+        return result
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="jobhistory_list_jobs",
+    annotations={
+        "title": "列出 MapReduce 作业",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def jobhistory_list_jobs(params: ListJobsInput) -> str:
+    """
+    列出已完成的 MapReduce 作业。
+    
+    支持多种过滤条件：
+    - 按用户名过滤
+    - 按作业状态过滤
+    - 按队列名过滤
+    - 按时间范围过滤
+    
+    支持分页，默认返回 20 条记录。
+    
+    Args:
+        params (ListJobsInput): 查询参数，包括：
+            - user: 用户名过滤
+            - state: 状态过滤（SUCCEEDED, FAILED, KILLED 等）
+            - queue: 队列名过滤
+            - limit: 返回数量限制
+            - started_time_begin/end: 开始时间范围
+            - finished_time_begin/end: 结束时间范围
+            - response_format: 输出格式
+    
+    Returns:
+        str: 作业列表，Markdown 或 JSON 格式
+        
+    Examples:
+        - 查询所有作业: 使用默认参数
+        - 查询失败的作业: state="FAILED"
+        - 查询特定用户的作业: user="hadoop"
+    """
+    try:
+        # 构建查询参数
+        query_params = {}
+        if params.user:
+            query_params["user"] = params.user
+        if params.state:
+            query_params["state"] = params.state.value
+        if params.queue:
+            query_params["queue"] = params.queue
+        if params.limit:
+            query_params["limit"] = params.limit
+        if params.started_time_begin:
+            query_params["startedTimeBegin"] = params.started_time_begin
+        if params.started_time_end:
+            query_params["startedTimeEnd"] = params.started_time_end
+        if params.finished_time_begin:
+            query_params["finishedTimeBegin"] = params.finished_time_begin
+        if params.finished_time_end:
+            query_params["finishedTimeEnd"] = params.finished_time_end
+
+        data = await _make_request("mapreduce/jobs", query_params)
+        jobs = data.get("jobs", {}).get("job", [])
+
+        if not jobs:
+            return "没有找到符合条件的作业。"
+
+        # JSON 格式输出
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps({
+                "total": len(jobs),
+                "jobs": jobs
+            }, indent=2, ensure_ascii=False)
+
+        # Markdown 格式输出
+        lines = [
+            "# MapReduce 作业列表",
+            f"共找到 **{len(jobs)}** 个作业",
+            ""
+        ]
+
+        for job in jobs:
+            job_id = job.get('id', 'N/A')
+            job_name = job.get('name', 'N/A')
+            state = job.get('state', 'N/A')
+            user = job.get('user', 'N/A')
+            queue = job.get('queue', 'N/A')
+            
+            # 状态图标
+            state_icon = {
+                'SUCCEEDED': '✅',
+                'FAILED': '❌',
+                'KILLED': '⚠️',
+                'RUNNING': '🔄'
+            }.get(state, '❓')
+            
+            lines.append(f"## {state_icon} {job_name}")
+            lines.append(f"**ID**: `{job_id}`")
+            lines.append("")
+            lines.append(f"| 属性 | 值 |")
+            lines.append(f"|------|-----|")
+            lines.append(f"| 用户 | {user} |")
+            lines.append(f"| 队列 | {queue} |")
+            lines.append(f"| 状态 | {state} |")
+            lines.append(f"| 开始时间 | {_format_timestamp(job.get('startTime', 0))} |")
+            lines.append(f"| 结束时间 | {_format_timestamp(job.get('finishTime', 0))} |")
+            lines.append(f"| Map 进度 | {job.get('mapsCompleted', 0)}/{job.get('mapsTotal', 0)} |")
+            lines.append(f"| Reduce 进度 | {job.get('reducesCompleted', 0)}/{job.get('reducesTotal', 0)} |")
+            lines.append("")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="jobhistory_get_job",
+    annotations={
+        "title": "获取作业详情",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def jobhistory_get_job(params: GetJobInput) -> str:
+    """
+    获取指定 MapReduce 作业的详细信息。
+    
+    包括作业的完整元数据：
+    - 基本信息（ID、名称、用户、队列、状态）
+    - 时间信息（提交、开始、结束时间）
+    - 任务统计（Map/Reduce 数量、成功/失败数）
+    - 性能统计（平均执行时间）
+    - 访问控制列表（ACL）
+    
+    Args:
+        params (GetJobInput): 包含 job_id 的输入参数
+    
+    Returns:
+        str: 作业详情，Markdown 或 JSON 格式
+        
+    Examples:
+        - 获取作业详情: job_id="job_1326381300833_2_2"
+    """
+    try:
+        data = await _make_request(f"mapreduce/jobs/{params.job_id}")
+        job = data.get("job", {})
+
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps(job, indent=2, ensure_ascii=False)
+
+        state = job.get('state', 'N/A')
+        state_icon = {
+            'SUCCEEDED': '✅',
+            'FAILED': '❌',
+            'KILLED': '⚠️',
+            'RUNNING': '🔄'
+        }.get(state, '❓')
+
+        lines = [
+            f"# {state_icon} 作业详情: {job.get('name', 'N/A')}",
+            "",
+            "## 基本信息",
+            f"| 属性 | 值 |",
+            f"|------|-----|",
+            f"| 作业 ID | `{job.get('id', 'N/A')}` |",
+            f"| 作业名称 | {job.get('name', 'N/A')} |",
+            f"| 用户 | {job.get('user', 'N/A')} |",
+            f"| 队列 | {job.get('queue', 'N/A')} |",
+            f"| 状态 | {state} |",
+            f"| Uber 模式 | {'是' if job.get('uberized') else '否'} |",
+            "",
+            "## 时间信息",
+            f"| 阶段 | 时间 |",
+            f"|------|-----|",
+            f"| 提交时间 | {_format_timestamp(job.get('submitTime', 0))} |",
+            f"| 开始时间 | {_format_timestamp(job.get('startTime', 0))} |",
+            f"| 结束时间 | {_format_timestamp(job.get('finishTime', 0))} |",
+            "",
+            "## 任务统计",
+            f"| 类型 | 完成/总数 | 成功 | 失败 | 终止 |",
+            f"|------|----------|------|------|------|",
+            f"| Map | {job.get('mapsCompleted', 0)}/{job.get('mapsTotal', 0)} | {job.get('successfulMapAttempts', 0)} | {job.get('failedMapAttempts', 0)} | {job.get('killedMapAttempts', 0)} |",
+            f"| Reduce | {job.get('reducesCompleted', 0)}/{job.get('reducesTotal', 0)} | {job.get('successfulReduceAttempts', 0)} | {job.get('failedReduceAttempts', 0)} | {job.get('killedReduceAttempts', 0)} |",
+            "",
+            "## 性能统计",
+            f"| 指标 | 耗时 |",
+            f"|------|------|",
+            f"| 平均 Map 时间 | {_format_duration(job.get('avgMapTime', 0))} |",
+            f"| 平均 Reduce 时间 | {_format_duration(job.get('avgReduceTime', 0))} |",
+            f"| 平均 Shuffle 时间 | {_format_duration(job.get('avgShuffleTime', 0))} |",
+            f"| 平均 Merge 时间 | {_format_duration(job.get('avgMergeTime', 0))} |",
+        ]
+
+        # 诊断信息
+        diagnostics = job.get('diagnostics')
+        if diagnostics:
+            lines.extend([
+                "",
+                "## 诊断信息",
+                f"```",
+                diagnostics,
+                f"```"
+            ])
+
+        # ACL 信息
+        acls = job.get('acls', [])
+        if acls:
+            lines.extend([
+                "",
+                "## 访问控制",
+                f"| ACL 名称 | 值 |",
+                f"|----------|-----|"
+            ])
+            for acl in acls:
+                lines.append(f"| {acl.get('name', 'N/A')} | {acl.get('value', 'N/A')} |")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="jobhistory_get_job_counters",
+    annotations={
+        "title": "获取作业计数器",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def jobhistory_get_job_counters(params: GetJobCountersInput) -> str:
+    """
+    获取指定作业的所有计数器信息。
+    
+    计数器包含作业执行的详细统计数据：
+    - 文件系统计数器（读写字节数、操作数）
+    - 任务计数器（输入输出记录数、溢出记录数）
+    - Shuffle 错误计数器
+    - 自定义计数器
+    
+    Args:
+        params (GetJobCountersInput): 包含 job_id 的输入参数
+    
+    Returns:
+        str: 计数器信息，按组分类展示
+    """
+    try:
+        data = await _make_request(f"mapreduce/jobs/{params.job_id}/counters")
+        counters = data.get("jobCounters", {})
+
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps(counters, indent=2, ensure_ascii=False)
+
+        job_id = counters.get('id', params.job_id)
+        return _format_counters_markdown(
+            counters,
+            f"作业计数器: {job_id}"
+        )
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="jobhistory_get_job_conf",
+    annotations={
+        "title": "获取作业配置",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def jobhistory_get_job_conf(params: GetJobConfInput) -> str:
+    """
+    获取指定作业的配置信息。
+    
+    返回作业运行时使用的所有配置参数，
+    包括 Hadoop 默认配置、站点配置和作业特定配置。
+    
+    可以通过 filter_key 参数过滤配置项。
+    
+    Args:
+        params (GetJobConfInput): 包含 job_id 和可选的 filter_key
+    
+    Returns:
+        str: 配置信息列表
+        
+    Examples:
+        - 获取所有配置: job_id="job_xxx"
+        - 过滤 MapReduce 配置: job_id="job_xxx", filter_key="mapreduce"
+    """
+    try:
+        data = await _make_request(f"mapreduce/jobs/{params.job_id}/conf")
+        conf = data.get("conf", {})
+
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps(conf, indent=2, ensure_ascii=False)
+
+        path = conf.get('path', 'N/A')
+        properties = conf.get('property', [])
+
+        # 应用过滤
+        if params.filter_key:
+            filter_lower = params.filter_key.lower()
+            properties = [
+                p for p in properties
+                if filter_lower in p.get('name', '').lower()
+            ]
+
+        lines = [
+            f"# 作业配置: {params.job_id}",
+            f"**配置文件路径**: `{path}`",
+            "",
+            f"共 **{len(properties)}** 个配置项" + (f"（过滤: '{params.filter_key}'）" if params.filter_key else ""),
+            ""
+        ]
+
+        # 按配置名称前缀分组
+        groups: Dict[str, List[Dict]] = {}
+        for prop in properties:
+            name = prop.get('name', '')
+            prefix = name.split('.')[0] if '.' in name else 'other'
+            if prefix not in groups:
+                groups[prefix] = []
+            groups[prefix].append(prop)
+
+        for prefix in sorted(groups.keys()):
+            props = groups[prefix]
+            lines.append(f"## {prefix} ({len(props)} 项)")
+            lines.append("")
+            for prop in props:
+                name = prop.get('name', 'N/A')
+                value = prop.get('value', 'N/A')
+                # 截断过长的值
+                if len(value) > 100:
+                    value = value[:100] + "..."
+                lines.append(f"- `{name}` = `{value}`")
+            lines.append("")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="jobhistory_get_job_attempts",
+    annotations={
+        "title": "获取作业尝试列表",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def jobhistory_get_job_attempts(params: GetJobAttemptsInput) -> str:
+    """
+    获取指定作业的 ApplicationMaster 尝试列表。
+    
+    当作业的 AM 失败时，YARN 会重新启动 AM，
+    每次启动都是一个新的尝试。此工具返回所有尝试的信息。
+    
+    Args:
+        params (GetJobAttemptsInput): 包含 job_id
+    
+    Returns:
+        str: AM 尝试列表
+    """
+    try:
+        data = await _make_request(f"mapreduce/jobs/{params.job_id}/jobattempts")
+        attempts = data.get("jobAttempts", {}).get("jobAttempt", [])
+
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps({
+                "total": len(attempts),
+                "attempts": attempts
+            }, indent=2, ensure_ascii=False)
+
+        if not attempts:
+            return "没有找到作业尝试记录。"
+
+        lines = [
+            f"# 作业尝试列表: {params.job_id}",
+            f"共 **{len(attempts)}** 次尝试",
+            ""
+        ]
+
+        for attempt in attempts:
+            attempt_id = attempt.get('id', 'N/A')
+            lines.append(f"## 尝试 #{attempt_id}")
+            lines.append("")
+            lines.append(f"| 属性 | 值 |")
+            lines.append(f"|------|-----|")
+            lines.append(f"| 容器 ID | `{attempt.get('containerId', 'N/A')}` |")
+            lines.append(f"| 节点 ID | {attempt.get('nodeId', 'N/A')} |")
+            lines.append(f"| 节点 HTTP 地址 | {attempt.get('nodeHttpAddress', 'N/A')} |")
+            lines.append(f"| 开始时间 | {_format_timestamp(attempt.get('startTime', 0))} |")
+            
+            logs_link = attempt.get('logsLink', '')
+            if logs_link:
+                lines.append(f"| 日志链接 | [查看日志]({logs_link}) |")
+            lines.append("")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="jobhistory_list_tasks",
+    annotations={
+        "title": "列出作业任务",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def jobhistory_list_tasks(params: ListTasksInput) -> str:
+    """
+    列出指定作业的所有任务。
+    
+    可以按任务类型（Map 或 Reduce）过滤。
+    
+    Args:
+        params (ListTasksInput): 包含 job_id 和可选的 task_type
+    
+    Returns:
+        str: 任务列表
+        
+    Examples:
+        - 列出所有任务: job_id="job_xxx"
+        - 只列出 Map 任务: job_id="job_xxx", task_type="m"
+        - 只列出 Reduce 任务: job_id="job_xxx", task_type="r"
+    """
+    try:
+        query_params = {}
+        if params.task_type:
+            query_params["type"] = params.task_type.value
+
+        data = await _make_request(
+            f"mapreduce/jobs/{params.job_id}/tasks",
+            query_params
+        )
+        tasks = data.get("tasks", {}).get("task", [])
+
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps({
+                "total": len(tasks),
+                "tasks": tasks
+            }, indent=2, ensure_ascii=False)
+
+        if not tasks:
+            return "没有找到任务。"
+
+        lines = [
+            f"# 任务列表: {params.job_id}",
+            f"共 **{len(tasks)}** 个任务",
+            ""
+        ]
+
+        # 按类型分组
+        map_tasks = [t for t in tasks if t.get('type') == 'MAP']
+        reduce_tasks = [t for t in tasks if t.get('type') == 'REDUCE']
+
+        if map_tasks:
+            lines.append(f"## Map 任务 ({len(map_tasks)} 个)")
+            lines.append("")
+            lines.append("| 任务 ID | 状态 | 进度 | 耗时 |")
+            lines.append("|---------|------|------|------|")
+            for task in map_tasks:
+                task_id = task.get('id', 'N/A')
+                state = task.get('state', 'N/A')
+                progress = task.get('progress', 0)
+                elapsed = _format_duration(task.get('elapsedTime', 0))
+                lines.append(f"| `{task_id}` | {state} | {progress:.1f}% | {elapsed} |")
+            lines.append("")
+
+        if reduce_tasks:
+            lines.append(f"## Reduce 任务 ({len(reduce_tasks)} 个)")
+            lines.append("")
+            lines.append("| 任务 ID | 状态 | 进度 | 耗时 |")
+            lines.append("|---------|------|------|------|")
+            for task in reduce_tasks:
+                task_id = task.get('id', 'N/A')
+                state = task.get('state', 'N/A')
+                progress = task.get('progress', 0)
+                elapsed = _format_duration(task.get('elapsedTime', 0))
+                lines.append(f"| `{task_id}` | {state} | {progress:.1f}% | {elapsed} |")
+            lines.append("")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="jobhistory_get_task",
+    annotations={
+        "title": "获取任务详情",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def jobhistory_get_task(params: GetTaskInput) -> str:
+    """
+    获取指定任务的详细信息。
+    
+    Args:
+        params (GetTaskInput): 包含 job_id 和 task_id
+    
+    Returns:
+        str: 任务详情
+    """
+    try:
+        data = await _make_request(
+            f"mapreduce/jobs/{params.job_id}/tasks/{params.task_id}"
+        )
+        task = data.get("task", {})
+
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps(task, indent=2, ensure_ascii=False)
+
+        task_type = task.get('type', 'UNKNOWN')
+        state = task.get('state', 'N/A')
+        state_icon = {
+            'SUCCEEDED': '✅',
+            'FAILED': '❌',
+            'KILLED': '⚠️',
+            'RUNNING': '🔄'
+        }.get(state, '❓')
+
+        lines = [
+            f"# {state_icon} 任务详情: {task.get('id', 'N/A')}",
+            "",
+            f"| 属性 | 值 |",
+            f"|------|-----|",
+            f"| 任务 ID | `{task.get('id', 'N/A')}` |",
+            f"| 类型 | {task_type} |",
+            f"| 状态 | {state} |",
+            f"| 进度 | {task.get('progress', 0):.1f}% |",
+            f"| 开始时间 | {_format_timestamp(task.get('startTime', 0))} |",
+            f"| 结束时间 | {_format_timestamp(task.get('finishTime', 0))} |",
+            f"| 耗时 | {_format_duration(task.get('elapsedTime', 0))} |",
+            f"| 成功尝试 | `{task.get('successfulAttempt', 'N/A')}` |",
+        ]
+
+        return "\n".join(lines)
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="jobhistory_get_task_counters",
+    annotations={
+        "title": "获取任务计数器",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def jobhistory_get_task_counters(params: GetTaskCountersInput) -> str:
+    """
+    获取指定任务的计数器信息。
+    
+    Args:
+        params (GetTaskCountersInput): 包含 job_id 和 task_id
+    
+    Returns:
+        str: 任务计数器信息
+    """
+    try:
+        data = await _make_request(
+            f"mapreduce/jobs/{params.job_id}/tasks/{params.task_id}/counters"
+        )
+        counters = data.get("jobTaskCounters", {})
+
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps(counters, indent=2, ensure_ascii=False)
+
+        task_id = counters.get('id', params.task_id)
+        return _format_counters_markdown(
+            counters,
+            f"任务计数器: {task_id}"
+        )
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="jobhistory_list_task_attempts",
+    annotations={
+        "title": "列出任务尝试",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def jobhistory_list_task_attempts(params: ListTaskAttemptsInput) -> str:
+    """
+    列出指定任务的所有尝试。
+    
+    当任务失败时会进行重试，每次重试都是一个新的尝试。
+    
+    Args:
+        params (ListTaskAttemptsInput): 包含 job_id 和 task_id
+    
+    Returns:
+        str: 任务尝试列表
+    """
+    try:
+        data = await _make_request(
+            f"mapreduce/jobs/{params.job_id}/tasks/{params.task_id}/attempts"
+        )
+        attempts = data.get("taskAttempts", {}).get("taskAttempt", [])
+
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps({
+                "total": len(attempts),
+                "attempts": attempts
+            }, indent=2, ensure_ascii=False)
+
+        if not attempts:
+            return "没有找到任务尝试记录。"
+
+        lines = [
+            f"# 任务尝试列表",
+            f"**任务 ID**: `{params.task_id}`",
+            f"共 **{len(attempts)}** 次尝试",
+            ""
+        ]
+
+        for attempt in attempts:
+            attempt_id = attempt.get('id', 'N/A')
+            state = attempt.get('state', 'N/A')
+            state_icon = {
+                'SUCCEEDED': '✅',
+                'FAILED': '❌',
+                'KILLED': '⚠️'
+            }.get(state, '❓')
+
+            lines.append(f"## {state_icon} {attempt_id}")
+            lines.append("")
+            lines.append(f"| 属性 | 值 |")
+            lines.append(f"|------|-----|")
+            lines.append(f"| 状态 | {state} |")
+            lines.append(f"| 类型 | {attempt.get('type', 'N/A')} |")
+            lines.append(f"| 进度 | {attempt.get('progress', 0):.1f}% |")
+            lines.append(f"| 容器 ID | `{attempt.get('assignedContainerId', 'N/A')}` |")
+            lines.append(f"| 节点 | {attempt.get('nodeHttpAddress', 'N/A')} |")
+            lines.append(f"| 机架 | {attempt.get('rack', 'N/A')} |")
+            lines.append(f"| 开始时间 | {_format_timestamp(attempt.get('startTime', 0))} |")
+            lines.append(f"| 结束时间 | {_format_timestamp(attempt.get('finishTime', 0))} |")
+            lines.append(f"| 耗时 | {_format_duration(attempt.get('elapsedTime', 0))} |")
+            
+            diagnostics = attempt.get('diagnostics')
+            if diagnostics:
+                lines.append(f"| 诊断信息 | {diagnostics} |")
+            lines.append("")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="jobhistory_get_task_attempt",
+    annotations={
+        "title": "获取任务尝试详情",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def jobhistory_get_task_attempt(params: GetTaskAttemptInput) -> str:
+    """
+    获取指定任务尝试的详细信息。
+    
+    对于 Reduce 任务尝试，还包含 Shuffle 和 Merge 阶段的时间信息。
+    
+    Args:
+        params (GetTaskAttemptInput): 包含 job_id, task_id 和 attempt_id
+    
+    Returns:
+        str: 任务尝试详情
+    """
+    try:
+        data = await _make_request(
+            f"mapreduce/jobs/{params.job_id}/tasks/{params.task_id}/attempts/{params.attempt_id}"
+        )
+        attempt = data.get("taskAttempt", {})
+
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps(attempt, indent=2, ensure_ascii=False)
+
+        state = attempt.get('state', 'N/A')
+        state_icon = {
+            'SUCCEEDED': '✅',
+            'FAILED': '❌',
+            'KILLED': '⚠️'
+        }.get(state, '❓')
+
+        lines = [
+            f"# {state_icon} 任务尝试详情",
+            f"**尝试 ID**: `{attempt.get('id', 'N/A')}`",
+            "",
+            "## 基本信息",
+            f"| 属性 | 值 |",
+            f"|------|-----|",
+            f"| 状态 | {state} |",
+            f"| 类型 | {attempt.get('type', 'N/A')} |",
+            f"| 进度 | {attempt.get('progress', 0):.1f}% |",
+            "",
+            "## 执行环境",
+            f"| 属性 | 值 |",
+            f"|------|-----|",
+            f"| 容器 ID | `{attempt.get('assignedContainerId', 'N/A')}` |",
+            f"| 节点地址 | {attempt.get('nodeHttpAddress', 'N/A')} |",
+            f"| 机架 | {attempt.get('rack', 'N/A')} |",
+            "",
+            "## 时间信息",
+            f"| 阶段 | 时间/耗时 |",
+            f"|------|----------|",
+            f"| 开始时间 | {_format_timestamp(attempt.get('startTime', 0))} |",
+            f"| 结束时间 | {_format_timestamp(attempt.get('finishTime', 0))} |",
+            f"| 总耗时 | {_format_duration(attempt.get('elapsedTime', 0))} |",
+        ]
+
+        # Reduce 任务特有的阶段时间
+        if attempt.get('type') == 'REDUCE':
+            lines.append(f"| Shuffle 完成时间 | {_format_timestamp(attempt.get('shuffleFinishTime', 0))} |")
+            lines.append(f"| Merge 完成时间 | {_format_timestamp(attempt.get('mergeFinishTime', 0))} |")
+            lines.append(f"| Shuffle 耗时 | {_format_duration(attempt.get('elapsedShuffleTime', 0))} |")
+            lines.append(f"| Merge 耗时 | {_format_duration(attempt.get('elapsedMergeTime', 0))} |")
+            lines.append(f"| Reduce 耗时 | {_format_duration(attempt.get('elapsedReduceTime', 0))} |")
+
+        diagnostics = attempt.get('diagnostics')
+        if diagnostics:
+            lines.extend([
+                "",
+                "## 诊断信息",
+                "```",
+                diagnostics,
+                "```"
+            ])
+
+        return "\n".join(lines)
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="jobhistory_get_task_attempt_counters",
+    annotations={
+        "title": "获取任务尝试计数器",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def jobhistory_get_task_attempt_counters(params: GetTaskAttemptCountersInput) -> str:
+    """
+    获取指定任务尝试的计数器信息。
+    
+    Args:
+        params (GetTaskAttemptCountersInput): 包含 job_id, task_id 和 attempt_id
+    
+    Returns:
+        str: 任务尝试计数器信息
+    """
+    try:
+        data = await _make_request(
+            f"mapreduce/jobs/{params.job_id}/tasks/{params.task_id}/attempts/{params.attempt_id}/counters"
+        )
+        counters = data.get("jobTaskAttemptCounters", {})
+
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps(counters, indent=2, ensure_ascii=False)
+
+        attempt_id = counters.get('id', params.attempt_id)
+        return _format_counters_markdown(
+            counters,
+            f"任务尝试计数器: {attempt_id}"
+        )
+    except Exception as e:
+        return _handle_error(e)
+
+
+# ==============================================================================
+# 主入口
+# ==============================================================================
+
+if __name__ == "__main__":
+    mcp.run()

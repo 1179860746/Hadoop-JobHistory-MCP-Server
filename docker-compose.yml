@@ -1,0 +1,49 @@
+# Docker Compose 配置文件
+# 用于本地开发和测试
+
+version: '3.8'
+
+services:
+  jobhistory-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: jobhistory-mcp-server:latest
+    container_name: jobhistory-mcp
+    
+    # 环境变量配置
+    environment:
+      - JOBHISTORY_URL=${JOBHISTORY_URL:-http://host.docker.internal:19888/ws/v1/history}
+    
+    # 如果需要网络访问宿主机的 Hadoop 集群
+    # macOS/Windows 使用 host.docker.internal
+    # Linux 需要使用 --add-host 或 network_mode: host
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    
+    # 资源限制（可选）
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+    
+    # 重启策略
+    restart: unless-stopped
+    
+    # 标签
+    labels:
+      - "app=jobhistory-mcp"
+      - "version=1.0.0"
+
+  # 可选：用于测试的 Mock JobHistory Server
+  # mock-jobhistory:
+  #   image: mockoon/cli:latest
+  #   command: --data /data/mock.json --port 19888
+  #   volumes:
+  #     - ./mock:/data
+  #   ports:
+  #     - "19888:19888"
