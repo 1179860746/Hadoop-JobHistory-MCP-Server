@@ -83,7 +83,7 @@ export JOBHISTORY_URL="http://your-history-server:19888/ws/v1/history"
 - 本地客户端无需直接访问 Hadoop 集群
 - 支持多个客户端同时连接
 
-#### 方法 A：直接部署（使用 Conda）
+#### 服务器端部署（使用 Conda）
 
 ##### 1. 上传项目到服务器
 
@@ -187,22 +187,6 @@ ss -tlnp | grep 8080
 curl http://localhost:8080/mcp
 ```
 
-#### 方法 B：使用 Docker 部署
-
-```bash
-# 构建镜像
-docker build -f Dockerfile.http -t jobhistory-mcp-server:http .
-
-# 运行容器
-docker run -d \
-  --name jobhistory-mcp-http \
-  -p 8080:8080 \
-  -e JOBHISTORY_URL="http://your-hadoop-cluster:19888/ws/v1/history" \
-  -v /var/log/mcp:/app/logs \
-  --restart unless-stopped \
-  jobhistory-mcp-server:http
-```
-
 #### 本地客户端配置
 
 **Cursor** (`~/.cursor/mcp.json`)：
@@ -298,9 +282,8 @@ JobHistoryMcpServer/
 ├── README.md                    # 项目说明文档
 ├── requirements.txt             # Python 依赖
 ├── jobhistory_mcp.py           # MCP Server 主代码
-├── Dockerfile                   # Docker 镜像构建文件
-├── docker-compose.yml          # Docker Compose 配置
-├── .dockerignore               # Docker 忽略文件
+├── start.sh                     # 启动脚本
+├── .env                         # 环境变量配置
 └── docs/
     ├── REST_API.md             # JobHistory REST API 文档
     ├── CODE_EXPLANATION.md     # 代码详解
