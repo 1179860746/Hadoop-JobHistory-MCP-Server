@@ -41,7 +41,7 @@ from pathlib import Path
 
 import httpx
 from pydantic import BaseModel, Field, ConfigDict, field_validator
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 
 # ==============================================================================
 # 日志配置
@@ -820,7 +820,6 @@ def _format_counters_markdown(counters_data: Dict[str, Any], title: str = "计�
 # ==============================================================================
 
 
-@log_tool_call
 @mcp.tool(
     name="jobhistory_get_info",
     annotations={
@@ -831,6 +830,7 @@ def _format_counters_markdown(counters_data: Dict[str, Any], title: str = "计�
         "openWorldHint": True
     }
 )
+@log_tool_call
 async def jobhistory_get_info() -> str:
     """
     获取 Hadoop JobHistory Server 的基本信息。
@@ -867,7 +867,6 @@ async def jobhistory_get_info() -> str:
         return _handle_error(e)
 
 
-@log_tool_call
 @mcp.tool(
     name="jobhistory_list_jobs",
     annotations={
@@ -878,6 +877,7 @@ async def jobhistory_get_info() -> str:
         "openWorldHint": True
     }
 )
+@log_tool_call
 async def jobhistory_list_jobs(params: ListJobsInput) -> str:
     """
     列出已完成的 MapReduce 作业。
@@ -982,7 +982,6 @@ async def jobhistory_list_jobs(params: ListJobsInput) -> str:
         return _handle_error(e)
 
 
-@log_tool_call
 @mcp.tool(
     name="jobhistory_get_job",
     annotations={
@@ -993,6 +992,7 @@ async def jobhistory_list_jobs(params: ListJobsInput) -> str:
         "openWorldHint": True
     }
 )
+@log_tool_call
 async def jobhistory_get_job(params: GetJobInput) -> str:
     """
     获取指定 MapReduce 作业的详细信息。
@@ -1091,7 +1091,6 @@ async def jobhistory_get_job(params: GetJobInput) -> str:
         return _handle_error(e)
 
 
-@log_tool_call
 @mcp.tool(
     name="jobhistory_get_job_counters",
     annotations={
@@ -1102,6 +1101,7 @@ async def jobhistory_get_job(params: GetJobInput) -> str:
         "openWorldHint": True
     }
 )
+@log_tool_call
 async def jobhistory_get_job_counters(params: GetJobCountersInput) -> str:
     """
     获取指定作业的所有计数器信息。
@@ -1134,7 +1134,6 @@ async def jobhistory_get_job_counters(params: GetJobCountersInput) -> str:
         return _handle_error(e)
 
 
-@log_tool_call
 @mcp.tool(
     name="jobhistory_get_job_conf",
     annotations={
@@ -1145,6 +1144,7 @@ async def jobhistory_get_job_counters(params: GetJobCountersInput) -> str:
         "openWorldHint": True
     }
 )
+@log_tool_call
 async def jobhistory_get_job_conf(params: GetJobConfInput) -> str:
     """
     获取指定作业的配置信息。
@@ -1217,7 +1217,6 @@ async def jobhistory_get_job_conf(params: GetJobConfInput) -> str:
         return _handle_error(e)
 
 
-@log_tool_call
 @mcp.tool(
     name="jobhistory_get_job_attempts",
     annotations={
@@ -1228,6 +1227,7 @@ async def jobhistory_get_job_conf(params: GetJobConfInput) -> str:
         "openWorldHint": True
     }
 )
+@log_tool_call
 async def jobhistory_get_job_attempts(params: GetJobAttemptsInput) -> str:
     """
     获取指定作业的 ApplicationMaster 尝试列表。
@@ -1281,7 +1281,6 @@ async def jobhistory_get_job_attempts(params: GetJobAttemptsInput) -> str:
         return _handle_error(e)
 
 
-@log_tool_call
 @mcp.tool(
     name="jobhistory_list_tasks",
     annotations={
@@ -1292,6 +1291,7 @@ async def jobhistory_get_job_attempts(params: GetJobAttemptsInput) -> str:
         "openWorldHint": True
     }
 )
+@log_tool_call
 async def jobhistory_list_tasks(params: ListTasksInput) -> str:
     """
     列出指定作业的所有任务。
@@ -1370,7 +1370,6 @@ async def jobhistory_list_tasks(params: ListTasksInput) -> str:
         return _handle_error(e)
 
 
-@log_tool_call
 @mcp.tool(
     name="jobhistory_get_task",
     annotations={
@@ -1381,6 +1380,7 @@ async def jobhistory_list_tasks(params: ListTasksInput) -> str:
         "openWorldHint": True
     }
 )
+@log_tool_call
 async def jobhistory_get_task(params: GetTaskInput) -> str:
     """
     获取指定任务的详细信息。
@@ -1429,7 +1429,6 @@ async def jobhistory_get_task(params: GetTaskInput) -> str:
         return _handle_error(e)
 
 
-@log_tool_call
 @mcp.tool(
     name="jobhistory_get_task_counters",
     annotations={
@@ -1440,6 +1439,7 @@ async def jobhistory_get_task(params: GetTaskInput) -> str:
         "openWorldHint": True
     }
 )
+@log_tool_call
 async def jobhistory_get_task_counters(params: GetTaskCountersInput) -> str:
     """
     获取指定任务的计数器信息。
@@ -1468,7 +1468,6 @@ async def jobhistory_get_task_counters(params: GetTaskCountersInput) -> str:
         return _handle_error(e)
 
 
-@log_tool_call
 @mcp.tool(
     name="jobhistory_list_task_attempts",
     annotations={
@@ -1479,6 +1478,7 @@ async def jobhistory_get_task_counters(params: GetTaskCountersInput) -> str:
         "openWorldHint": True
     }
 )
+@log_tool_call
 async def jobhistory_list_task_attempts(params: ListTaskAttemptsInput) -> str:
     """
     列出指定任务的所有尝试。
@@ -1546,7 +1546,6 @@ async def jobhistory_list_task_attempts(params: ListTaskAttemptsInput) -> str:
         return _handle_error(e)
 
 
-@log_tool_call
 @mcp.tool(
     name="jobhistory_get_task_attempt",
     annotations={
@@ -1557,6 +1556,7 @@ async def jobhistory_list_task_attempts(params: ListTaskAttemptsInput) -> str:
         "openWorldHint": True
     }
 )
+@log_tool_call
 async def jobhistory_get_task_attempt(params: GetTaskAttemptInput) -> str:
     """
     获取指定任务尝试的详细信息。
@@ -1634,7 +1634,6 @@ async def jobhistory_get_task_attempt(params: GetTaskAttemptInput) -> str:
         return _handle_error(e)
 
 
-@log_tool_call
 @mcp.tool(
     name="jobhistory_get_task_attempt_counters",
     annotations={
@@ -1645,6 +1644,7 @@ async def jobhistory_get_task_attempt(params: GetTaskAttemptInput) -> str:
         "openWorldHint": True
     }
 )
+@log_tool_call
 async def jobhistory_get_task_attempt_counters(params: GetTaskAttemptCountersInput) -> str:
     """
     获取指定任务尝试的计数器信息。

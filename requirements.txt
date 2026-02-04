@@ -1,6 +1,6 @@
 # JobHistory MCP Server 依赖
-# MCP SDK (包含 FastMCP)
-mcp>=1.0.0
+# FastMCP - 独立的 MCP 服务器框架
+fastmcp>=2.0.0
 
 # Pydantic v2 用于输入验证
 pydantic>=2.0.0
