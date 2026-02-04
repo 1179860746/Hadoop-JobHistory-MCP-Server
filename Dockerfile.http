@@ -1,0 +1,51 @@
+# JobHistory MCP Server Docker Image - HTTP 模式
+# 用于远程服务器部署，支持多客户端连接
+
+FROM python:3.11-slim
+
+LABEL maintainer="Winston"
+LABEL description="MCP Server for Hadoop JobHistory REST API (HTTP mode)"
+LABEL version="1.1.0"
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY jobhistory_mcp.py .
+
+# 创建用户和日志目录
+RUN useradd --create-home --shell /bin/bash mcpuser && \
+    mkdir -p /app/logs && \
+    chown -R mcpuser:mcpuser /app
+
+USER mcpuser
+
+# 环境变量配置
+ENV JOBHISTORY_URL="http://localhost:19888/ws/v1/history" \
+    MCP_TRANSPORT="http" \
+    MCP_HOST="0.0.0.0" \
+    MCP_PORT="8080" \
+    LOG_LEVEL="INFO" \
+    LOG_FILE="/app/logs/jobhistory_mcp.log" \
+    LOG_MAX_SIZE="268435456" \
+    LOG_BACKUP_COUNT="5" \
+    LOG_TO_STDERR="true"
+
+# 暴露 HTTP 端口
+EXPOSE 8080
+
+# 日志卷
+VOLUME ["/app/logs"]
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD python -c "import httpx; httpx.get('http://localhost:8080/health', timeout=5)" || exit 1
+
+# 启动 HTTP 模式
+CMD ["python", "jobhistory_mcp.py", "--http"]

@@ -12,68 +12,123 @@
 - ⚙️ **配置查询**: 获取作业运行时的配置参数
 - 🔄 **灵活输出**: 支持 Markdown（人类可读）和 JSON（程序处理）两种格式
 
-## 快速开始
+## 部署方式
 
-### 1. 安装依赖
+### 方式一：本地部署（stdio 模式）
+
+适合 MCP Server 和客户端在同一台机器上运行。
+
+#### 1. 安装依赖
 
 ```bash
 cd JobHistoryMcpServer
 pip install -r requirements.txt
 ```
 
-### 2. 配置 JobHistory Server 地址
-
-通过环境变量配置 JobHistory Server 的地址：
+#### 2. 配置环境变量
 
 ```bash
 export JOBHISTORY_URL="http://your-history-server:19888/ws/v1/history"
 ```
 
-默认地址为 `http://localhost:19888/ws/v1/history`
+#### 3. 配置 MCP 客户端
 
-### 3. 运行服务
+**Cursor** (`~/.cursor/mcp.json`)：
+
+```json
+{
+  "mcpServers": {
+    "jobhistory_mcp": {
+      "command": "python",
+      "args": ["/path/to/JobHistoryMcpServer/jobhistory_mcp.py"],
+      "env": {
+        "JOBHISTORY_URL": "http://your-history-server:19888/ws/v1/history"
+      }
+    }
+  }
+}
+```
+
+**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`)：
+
+```json
+{
+  "mcpServers": {
+    "jobhistory_mcp": {
+      "command": "python",
+      "args": ["/path/to/JobHistoryMcpServer/jobhistory_mcp.py"],
+      "env": {
+        "JOBHISTORY_URL": "http://your-history-server:19888/ws/v1/history"
+      }
+    }
+  }
+}
+```
+
+---
+
+### 方式二：远程服务器部署
+
+适合将 MCP Server 部署在靠近 Hadoop 集群的服务器，本地客户端远程连接。
+
+```
+┌─────────────┐       SSH/HTTP       ┌─────────────┐      HTTP      ┌─────────────┐
+│ 本地客户端   │ ◄──────────────────► │ MCP Server  │ ◄────────────► │ JobHistory  │
+│ (Cursor)    │                      │ (远程服务器) │                │ Server      │
+└─────────────┘                      └─────────────┘                └─────────────┘
+```
+
+#### 方法 A：通过 SSH 连接（推荐，简单安全）
+
+在 `~/.cursor/mcp.json` 中配置：
+
+```json
+{
+  "mcpServers": {
+    "jobhistory_mcp": {
+      "command": "ssh",
+      "args": [
+        "-o", "StrictHostKeyChecking=no",
+        "user@your-server-ip",
+        "cd /opt/JobHistoryMcpServer && JOBHISTORY_URL=http://hadoop-cluster:19888/ws/v1/history ./venv/bin/python jobhistory_mcp.py"
+      ]
+    }
+  }
+}
+```
+
+**前置条件**：
+1. 服务器上已部署项目到 `/opt/JobHistoryMcpServer`
+2. 已配置 SSH 免密登录：`ssh-copy-id user@your-server-ip`
+
+#### 方法 B：通过 HTTP 连接
+
+**服务器端**（启动 HTTP 模式）：
 
 ```bash
-python jobhistory_mcp.py
+# 使用 Docker
+docker run -d \
+  --name jobhistory-mcp \
+  -p 8080:8080 \
+  -e JOBHISTORY_URL="http://hadoop-cluster:19888/ws/v1/history" \
+  -e MCP_TRANSPORT="http" \
+  -e MCP_PORT="8080" \
+  jobhistory-mcp-server:latest python jobhistory_mcp.py --http
 ```
 
-## MCP 客户端配置
-
-### Cursor 配置
-
-在 `~/.cursor/mcp.json` 中添加：
+**本地客户端**：
 
 ```json
 {
   "mcpServers": {
     "jobhistory_mcp": {
-      "command": "python",
-      "args": ["/path/to/JobHistoryMcpServer/jobhistory_mcp.py"],
-      "env": {
-        "JOBHISTORY_URL": "http://your-history-server:19888/ws/v1/history"
-      }
+      "url": "http://your-server-ip:8080/mcp"
     }
   }
 }
 ```
 
-### Claude Desktop 配置
-
-在 `~/Library/Application Support/Claude/claude_desktop_config.json` 中添加：
-
-```json
-{
-  "mcpServers": {
-    "jobhistory_mcp": {
-      "command": "python",
-      "args": ["/path/to/JobHistoryMcpServer/jobhistory_mcp.py"],
-      "env": {
-        "JOBHISTORY_URL": "http://your-history-server:19888/ws/v1/history"
-      }
-    }
-  }
-}
-```
+详细说明请参考 [远程部署指南](docs/REMOTE_DEPLOYMENT.md)
 
 ## 可用工具列表
 
@@ -140,7 +195,9 @@ JobHistoryMcpServer/
     ├── REST_API.md             # JobHistory REST API 文档
     ├── MCP_USAGE.md            # MCP 使用说明
     ├── CODE_EXPLANATION.md     # 代码详解
-    └── DOCKER.md               # Docker 部署指南
+    ├── DOCKER.md               # Docker 部署指南
+    ├── LOGGING.md              # 日志配置指南
+    └── REMOTE_DEPLOYMENT.md    # 远程部署指南
 ```
 
 ## Docker 部署
@@ -211,6 +268,7 @@ docker run -i --rm \
 - [代码详解](docs/CODE_EXPLANATION.md) - 代码结构和实现说明
 - [Docker 部署指南](docs/DOCKER.md) - Docker 构建和部署说明
 - [日志配置指南](docs/LOGGING.md) - 日志功能和配置说明
+- [远程部署指南](docs/REMOTE_DEPLOYMENT.md) - 远程服务器部署和连接说明
 
 ## 依赖
 

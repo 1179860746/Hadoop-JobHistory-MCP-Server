@@ -1678,4 +1678,18 @@ async def jobhistory_get_task_attempt_counters(params: GetTaskAttemptCountersInp
 # ==============================================================================
 
 if __name__ == "__main__":
-    mcp.run()
+    import sys
+    
+    # 检查是否使用 HTTP 传输模式
+    use_http = "--http" in sys.argv or os.getenv("MCP_TRANSPORT", "").lower() == "http"
+    
+    if use_http:
+        # HTTP 模式 - 用于远程服务器部署
+        host = os.getenv("MCP_HOST", "0.0.0.0")
+        port = int(os.getenv("MCP_PORT", "8080"))
+        logger.info(f"启动 HTTP 传输模式: http://{host}:{port}")
+        mcp.run(transport="streamable-http", host=host, port=port)
+    else:
+        # stdio 模式 - 默认，用于本地部署
+        logger.info("启动 stdio 传输模式")
+        mcp.run()
