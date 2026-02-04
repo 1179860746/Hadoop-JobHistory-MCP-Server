@@ -67,56 +67,145 @@ export JOBHISTORY_URL="http://your-history-server:19888/ws/v1/history"
 
 ---
 
-### 方式二：远程服务器部署
+### 方式二：远程服务器部署（HTTP 模式）
 
-适合将 MCP Server 部署在靠近 Hadoop 集群的服务器，本地客户端远程连接。
+适合将 MCP Server 部署在靠近 Hadoop 集群的服务器，本地客户端通过 HTTP 远程连接。
 
 ```
-┌─────────────┐       SSH/HTTP       ┌─────────────┐      HTTP      ┌─────────────┐
-│ 本地客户端   │ ◄──────────────────► │ MCP Server  │ ◄────────────► │ JobHistory  │
-│ (Cursor)    │                      │ (远程服务器) │                │ Server      │
-└─────────────┘                      └─────────────┘                └─────────────┘
+┌─────────────────┐         HTTP          ┌─────────────────┐         HTTP          ┌─────────────────┐
+│   本地客户端     │ ◄──────────────────► │   MCP Server    │ ◄──────────────────► │  JobHistory     │
+│  (Cursor等)     │      (网络)           │   (远程服务器)   │      (内网)           │   Server        │
+└─────────────────┘                       └─────────────────┘                       └─────────────────┘
 ```
 
-#### 方法 A：通过 SSH 连接（推荐，简单安全）
+**优势**：
+- MCP Server 部署在靠近 Hadoop 集群的服务器，网络延迟低
+- 本地客户端无需直接访问 Hadoop 集群
+- 支持多个客户端同时连接
 
-在 `~/.cursor/mcp.json` 中配置：
+#### 方法 A：直接部署（使用 Conda）
 
-```json
-{
-  "mcpServers": {
-    "jobhistory_mcp": {
-      "command": "ssh",
-      "args": [
-        "-o", "StrictHostKeyChecking=no",
-        "user@your-server-ip",
-        "cd /opt/JobHistoryMcpServer && JOBHISTORY_URL=http://hadoop-cluster:19888/ws/v1/history ./venv/bin/python jobhistory_mcp.py"
-      ]
-    }
-  }
-}
-```
-
-**前置条件**：
-1. 服务器上已部署项目到 `/opt/JobHistoryMcpServer`
-2. 已配置 SSH 免密登录：`ssh-copy-id user@your-server-ip`
-
-#### 方法 B：通过 HTTP 连接
-
-**服务器端**（启动 HTTP 模式）：
+##### 1. 上传项目到服务器
 
 ```bash
-# 使用 Docker
-docker run -d \
-  --name jobhistory-mcp \
-  -p 8080:8080 \
-  -e JOBHISTORY_URL="http://hadoop-cluster:19888/ws/v1/history" \
-  -e MCP_TRANSPORT="http" \
-  -e MCP_PORT="8080" \
-  jobhistory-mcp-server:latest python jobhistory_mcp.py --http
+scp -r JobHistoryMcpServer user@server:/app/
 ```
 
-**本地客户端**：
+##### 2. 创建 Conda 环境并安装依赖
+
+```bash
+# SSH 登录服务器
+ssh user@server
+
+# 创建并激活 conda 环境
+conda create -n py310 python=3.10 -y
+conda activate py310
+
+# 安装依赖
+cd /app/JobHistoryMcpServer
+pip install -r requirements.txt
+```
+
+##### 3. 配置环境变量文件
+
+创建 `/app/JobHistoryMcpServer/.env`：
+
+```bash
+JOBHISTORY_URL=http://your-hadoop-cluster:19888/ws/v1/history
+MCP_TRANSPORT=http
+MCP_HOST=0.0.0.0
+MCP_PORT=8080
+LOG_LEVEL=INFO
+LOG_FILE=/app/JobHistoryMcpServer/jobhistory_mcp.log
+```
+
+##### 4. 创建启动脚本
+
+创建 `/app/JobHistoryMcpServer/start.sh`：
+
+```bash
+#!/bin/bash
+# 激活 conda 环境
+source /app/miniconda3/etc/profile.d/conda.sh
+conda activate py310
+
+# 验证 Python 版本
+echo "Python version:"
+python --version
+
+# 启动服务
+exec python /app/JobHistoryMcpServer/jobhistory_mcp.py --http
+```
+
+添加执行权限：
+
+```bash
+chmod +x /app/JobHistoryMcpServer/start.sh
+```
+
+##### 5. 配置 systemd 服务
+
+创建 `/etc/systemd/system/jobhistory-mcp.service`：
+
+```ini
+[Unit]
+Description=JobHistory MCP Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/app/JobHistoryMcpServer
+EnvironmentFile=/app/JobHistoryMcpServer/.env
+ExecStart=/app/JobHistoryMcpServer/start.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启用并启动服务：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable jobhistory-mcp
+sudo systemctl start jobhistory-mcp
+sudo systemctl status jobhistory-mcp
+```
+
+##### 6. 验证服务运行
+
+```bash
+# 检查服务状态
+systemctl status jobhistory-mcp
+
+# 检查端口监听
+ss -tlnp | grep 8080
+
+# 测试 MCP 端点
+curl http://localhost:8080/mcp
+```
+
+#### 方法 B：使用 Docker 部署
+
+```bash
+# 构建镜像
+docker build -f Dockerfile.http -t jobhistory-mcp-server:http .
+
+# 运行容器
+docker run -d \
+  --name jobhistory-mcp-http \
+  -p 8080:8080 \
+  -e JOBHISTORY_URL="http://your-hadoop-cluster:19888/ws/v1/history" \
+  -v /var/log/mcp:/app/logs \
+  --restart unless-stopped \
+  jobhistory-mcp-server:http
+```
+
+#### 本地客户端配置
+
+**Cursor** (`~/.cursor/mcp.json`)：
 
 ```json
 {
@@ -128,7 +217,28 @@ docker run -d \
 }
 ```
 
-详细说明请参考 [远程部署指南](docs/REMOTE_DEPLOYMENT.md)
+**Claude Desktop**：
+
+```json
+{
+  "mcpServers": {
+    "jobhistory_mcp": {
+      "url": "http://your-server-ip:8080/mcp"
+    }
+  }
+}
+```
+
+#### 安全建议
+
+1. **防火墙规则**：只允许特定 IP 访问 MCP Server 端口
+   ```bash
+   sudo ufw allow from YOUR_LOCAL_IP to any port 8080
+   ```
+
+2. **使用 HTTPS**：生产环境建议通过 Nginx 反向代理添加 SSL
+
+3. **网络隔离**：将 MCP Server 部署在可访问 Hadoop 集群的内网中
 
 ## 可用工具列表
 
@@ -193,48 +303,9 @@ JobHistoryMcpServer/
 ├── .dockerignore               # Docker 忽略文件
 └── docs/
     ├── REST_API.md             # JobHistory REST API 文档
-    ├── MCP_USAGE.md            # MCP 使用说明
     ├── CODE_EXPLANATION.md     # 代码详解
-    ├── DOCKER.md               # Docker 部署指南
-    ├── LOGGING.md              # 日志配置指南
-    └── REMOTE_DEPLOYMENT.md    # 远程部署指南
+    └── LOGGING.md              # 日志配置指南
 ```
-
-## Docker 部署
-
-### 构建镜像
-
-```bash
-cd JobHistoryMcpServer
-docker build -t jobhistory-mcp-server:latest .
-```
-
-### 运行容器
-
-```bash
-docker run -i --rm \
-  -e JOBHISTORY_URL="http://your-hadoop-cluster:19888/ws/v1/history" \
-  jobhistory-mcp-server:latest
-```
-
-### Cursor MCP 配置（Docker 方式）
-
-```json
-{
-  "mcpServers": {
-    "jobhistory_mcp": {
-      "command": "docker",
-      "args": [
-        "run", "-i", "--rm",
-        "-e", "JOBHISTORY_URL=http://your-hadoop-cluster:19888/ws/v1/history",
-        "jobhistory-mcp-server:latest"
-      ]
-    }
-  }
-}
-```
-
-详细说明请参考 [Docker 部署指南](docs/DOCKER.md)
 
 ## 日志配置
 
@@ -266,14 +337,13 @@ docker run -i --rm \
 - [REST API 文档](docs/REST_API.md) - JobHistory Server REST API 完整说明
 - [MCP 使用说明](docs/MCP_USAGE.md) - MCP Server 配置和使用指南
 - [代码详解](docs/CODE_EXPLANATION.md) - 代码结构和实现说明
-- [Docker 部署指南](docs/DOCKER.md) - Docker 构建和部署说明
 - [日志配置指南](docs/LOGGING.md) - 日志功能和配置说明
 - [远程部署指南](docs/REMOTE_DEPLOYMENT.md) - 远程服务器部署和连接说明
 
 ## 依赖
 
-- Python 3.9+
-- mcp >= 1.0.0 (FastMCP)
+- Python 3.10+
+- fastmcp >= 2.0.0
 - pydantic >= 2.0.0
 - httpx >= 0.25.0
 
