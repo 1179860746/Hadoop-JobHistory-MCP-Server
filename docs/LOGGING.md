@@ -7,7 +7,8 @@
 日志系统记录以下信息：
 1. **工具调用日志**: 来自 LLM 的 MCP 工具调用请求
 2. **REST 请求日志**: 向 JobHistory Server 发出的 HTTP 请求
-3. **错误日志**: 执行过程中的异常和错误
+3. **容器日志请求**: 获取任务容器日志的 HTTP 请求
+4. **错误日志**: 执行过程中的异常和错误
 
 ## 日志格式
 
@@ -172,6 +173,8 @@ export LOG_BACKUP_COUNT=3
 ```
 2024-01-15 10:30:45 | INFO  | -        | JobHistory MCP Server 初始化
 2024-01-15 10:30:45 | INFO  | -        | JobHistory URL: http://hadoop:19888/ws/v1/history
+2024-01-15 10:30:45 | INFO  | -        | Logs Base URL: http://hadoop:19888/jobhistory/logs
+2024-01-15 10:30:45 | INFO  | -        | NodeManager Port: 8052
 2024-01-15 10:30:45 | INFO  | -        | 请求超时: 30.0s
 2024-01-15 10:31:00 | INFO  | a1b2c3d4 | [TOOL_CALL] jobhistory_list_jobs, params: {"limit": 10}
 2024-01-15 10:31:00 | INFO  | a1b2c3d4 | [REST_REQ] GET http://hadoop:19888/ws/v1/history/mapreduce/jobs?limit=10
@@ -196,3 +199,33 @@ export LOG_BACKUP_COUNT=3
 2024-01-15 10:33:30 | WARN  | c3d4e5f6 | [REST_ERR] Timeout after 30000.12ms
 2024-01-15 10:33:30 | INFO  | c3d4e5f6 | [TOOL_RSP] success, size: 156 bytes, duration: 30023.45ms
 ```
+
+### 获取容器日志（部分读取）
+
+```
+2024-01-15 10:35:00 | INFO  | d4e5f6g7 | [TOOL_CALL] jobhistory_get_task_attempt_logs_partial, params: {"job_id": "job_xxx", "task_id": "task_xxx", "attempt_id": "attempt_xxx", "log_type": "syslog", "start": -4096}
+2024-01-15 10:35:00 | INFO  | d4e5f6g7 | [REST_REQ] GET http://hadoop:19888/ws/v1/history/mapreduce/jobs/job_xxx/tasks/task_xxx/attempts/attempt_xxx
+2024-01-15 10:35:00 | INFO  | d4e5f6g7 | [REST_RSP] 200 OK, size: 523 bytes, duration: 45.23ms
+2024-01-15 10:35:00 | INFO  | d4e5f6g7 | [REST_REQ] GET http://hadoop:19888/ws/v1/history/mapreduce/jobs/job_xxx
+2024-01-15 10:35:00 | INFO  | d4e5f6g7 | [REST_RSP] 200 OK, size: 1234 bytes, duration: 32.15ms
+2024-01-15 10:35:00 | INFO  | d4e5f6g7 | 获取部分日志 URL: http://hadoop:19888/jobhistory/logs/node01:8052/container_xxx/attempt_xxx/user/syslog/?start=-4096
+2024-01-15 10:35:01 | INFO  | d4e5f6g7 | [REST_REQ] GET http://hadoop:19888/jobhistory/logs/node01:8052/container_xxx/attempt_xxx/user/syslog/?start=-4096
+2024-01-15 10:35:01 | INFO  | d4e5f6g7 | [REST_RSP] 200 OK, size: 8234 bytes, duration: 256.78ms
+2024-01-15 10:35:01 | INFO  | d4e5f6g7 | [TOOL_RSP] success, size: 4523 bytes, duration: 356.45ms
+```
+
+### 获取容器日志（完整读取）
+
+```
+2024-01-15 10:36:00 | INFO  | e5f6g7h8 | [TOOL_CALL] jobhistory_get_task_attempt_logs, params: {"job_id": "job_xxx", "task_id": "task_xxx", "attempt_id": "attempt_xxx", "log_type": "stdout"}
+2024-01-15 10:36:00 | INFO  | e5f6g7h8 | [REST_REQ] GET http://hadoop:19888/ws/v1/history/mapreduce/jobs/job_xxx/tasks/task_xxx/attempts/attempt_xxx
+2024-01-15 10:36:00 | INFO  | e5f6g7h8 | [REST_RSP] 200 OK, size: 523 bytes, duration: 45.23ms
+2024-01-15 10:36:00 | INFO  | e5f6g7h8 | [REST_REQ] GET http://hadoop:19888/ws/v1/history/mapreduce/jobs/job_xxx
+2024-01-15 10:36:00 | INFO  | e5f6g7h8 | [REST_RSP] 200 OK, size: 1234 bytes, duration: 32.15ms
+2024-01-15 10:36:00 | INFO  | e5f6g7h8 | 获取日志 URL: http://hadoop:19888/jobhistory/logs/node01:8052/container_xxx/attempt_xxx/user/stdout/?start=0&start.time=0&end.time=9223372036854775807
+2024-01-15 10:36:01 | INFO  | e5f6g7h8 | [REST_REQ] GET http://hadoop:19888/jobhistory/logs/node01:8052/container_xxx/attempt_xxx/user/stdout/?start=0&start.time=0&end.time=9223372036854775807
+2024-01-15 10:36:03 | INFO  | e5f6g7h8 | [REST_RSP] 200 OK, size: 1523456 bytes, duration: 2156.78ms
+2024-01-15 10:36:03 | INFO  | e5f6g7h8 | [TOOL_RSP] success, size: 1234567 bytes, duration: 2356.45ms
+```
+
+> **注意**: 完整日志可能非常大，建议优先使用部分读取工具 `jobhistory_get_task_attempt_logs_partial` 来避免消耗过多 Token。

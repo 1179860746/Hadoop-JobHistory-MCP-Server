@@ -19,12 +19,14 @@ JobHistory MCP Server 是一个基于 Python FastMCP 框架实现的 MCP 服务�
 
 ```
 jobhistory_mcp.py
-├── 配置常量（第 30-40 行）
-├── MCP Server 初始化（第 45 行）
-├── 枚举类型定义（第 50-110 行）
-├── Pydantic 输入模型（第 115-280 行）
-├── 工具函数（第 285-410 行）
-└── MCP 工具定义（第 415-850 行）
+├── 日志配置（setup_logging, RequestIdFilter）
+├── 配置常量（JOBHISTORY_BASE_URL, NODEMANAGER_PORT, LOGS_BASE_URL 等）
+├── 日志装饰器（log_tool_call）
+├── MCP Server 初始化
+├── 枚举类型定义（ResponseFormat, JobState, TaskType, TaskState, LogType）
+├── Pydantic 输入模型（ListJobsInput, GetJobInput, GetTaskAttemptLogsInput 等）
+├── 工具函数（_make_request, _handle_error, _format_*, _extract_*, _fetch_logs_html）
+└── MCP 工具定义（14 个工具）
 ```
 
 ---
@@ -40,13 +42,27 @@ JOBHISTORY_BASE_URL = os.getenv(
     "http://localhost:19888/ws/v1/history"
 )
 
+# NodeManager 端口，用于获取容器日志
+NODEMANAGER_PORT = os.getenv("NODEMANAGER_PORT", "8052")
+
 # HTTP 请求超时时间（秒）
-REQUEST_TIMEOUT = 30.0
+REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "30.0"))
+
+
+def _get_logs_base_url() -> str:
+    """从 JOBHISTORY_BASE_URL 构造日志服务的基础 URL"""
+    parsed = urlparse(JOBHISTORY_BASE_URL)
+    return f"{parsed.scheme}://{parsed.netloc}/jobhistory/logs"
+
+# 日志服务基础 URL
+LOGS_BASE_URL = _get_logs_base_url()
 ```
 
 **设计说明**:
 - 使用环境变量配置服务地址，便于在不同环境中部署
 - 提供合理的默认值，开箱即用
+- `NODEMANAGER_PORT` 用于构造容器日志的 URL
+- `LOGS_BASE_URL` 从 `JOBHISTORY_BASE_URL` 自动派生，减少配置项
 - 超时时间可根据网络情况调整
 
 ---
@@ -112,6 +128,26 @@ class TaskType(str, Enum):
 **说明**:
 - 对应 REST API 的 `type` 查询参数
 - `m` 表示 Map 任务，`r` 表示 Reduce 任务
+
+#### LogType 枚举
+
+```python
+class LogType(str, Enum):
+    """容器日志类型枚举"""
+    STDOUT = "stdout"
+    STDERR = "stderr"
+    SYSLOG = "syslog"
+    SYSLOG_SHUFFLE = "syslog.shuffle"
+    PRELAUNCH_OUT = "prelaunch.out"
+    PRELAUNCH_ERR = "prelaunch.err"
+    CONTAINER_LOCALIZER_SYSLOG = "container-localizer-syslog"
+```
+
+**说明**:
+- 定义容器支持的日志文件类型
+- `syslog` 是最常用的日志类型，包含任务执行的详细信息
+- `stdout/stderr` 是任务的标准输出和错误输出
+- `prelaunch.*` 是容器启动前的日志
 
 ---
 
@@ -255,6 +291,45 @@ def _format_duration(ms: int) -> str:
 - 处理无效值（0 或负数）返回 "N/A"
 - 智能选择时间单位（秒/分/时）
 
+#### 容器日志函数
+
+```python
+def _extract_hostname(node_http_address: str) -> str:
+    """从 nodeHttpAddress 提取主机名"""
+    if ':' in node_http_address:
+        return node_http_address.rsplit(':', 1)[0]
+    return node_http_address
+
+async def _fetch_logs_html(url: str) -> str:
+    """获取日志 HTML 内容"""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            url,
+            timeout=REQUEST_TIMEOUT,
+            headers={"Accept": "text/html"},
+            follow_redirects=True
+        )
+        response.raise_for_status()
+        return response.text
+
+def _extract_pre_content(html: str) -> str:
+    """从 HTML 中提取 <pre> 标签的内容"""
+    match = re.search(r'<pre[^>]*>(.*?)</pre>', html, re.DOTALL | re.IGNORECASE)
+    if match:
+        content = match.group(1)
+        # 处理 HTML 实体
+        content = content.replace('&lt;', '<')
+        content = content.replace('&gt;', '>')
+        content = content.replace('&amp;', '&')
+        return content.strip()
+    return ""
+```
+
+**设计说明**:
+- `_extract_hostname`: 从 `nodeHttpAddress`（如 `host:8042`）提取主机名，与 `NODEMANAGER_PORT` 组合构造日志 URL
+- `_fetch_logs_html`: 获取日志页面的 HTML 内容，使用 `follow_redirects=True` 处理重定向
+- `_extract_pre_content`: 使用正则表达式从 HTML 中提取 `<pre>` 标签的内容，并处理 HTML 实体转义
+
 ---
 
 ### 6. MCP 工具定义
@@ -384,6 +459,78 @@ if __name__ == "__main__":
 - `mcp.run()` 启动 MCP 服务器
 - 默认使用 stdio 传输（适合本地集成）
 - 可以通过参数切换到 HTTP 传输
+
+---
+
+### 8. 容器日志工具
+
+#### 完整日志获取
+
+```python
+@mcp.tool(name="jobhistory_get_task_attempt_logs", ...)
+async def jobhistory_get_task_attempt_logs(params: GetTaskAttemptLogsInput) -> str:
+    """获取指定任务尝试的容器日志内容（完整）"""
+    try:
+        # 1. 获取任务尝试信息（获取 containerId 和 nodeHttpAddress）
+        attempt_data = await _make_request(f"mapreduce/jobs/{params.job_id}/tasks/{params.task_id}/attempts/{params.attempt_id}")
+        attempt = attempt_data.get("taskAttempt", {})
+        container_id = attempt.get("assignedContainerId")
+        node_http_address = attempt.get("nodeHttpAddress")
+        
+        # 2. 获取作业信息（获取 user）
+        job_data = await _make_request(f"mapreduce/jobs/{params.job_id}")
+        user = job_data.get("job", {}).get("user")
+        
+        # 3. 构造日志 URL
+        hostname = _extract_hostname(node_http_address)
+        log_url = f"{LOGS_BASE_URL}/{hostname}:{NODEMANAGER_PORT}/{container_id}/{params.attempt_id}/{user}/{params.log_type.value}/?start=0&start.time=0&end.time=9223372036854775807"
+        
+        # 4. 获取并解析日志
+        html_content = await _fetch_logs_html(log_url)
+        log_content = _extract_pre_content(html_content)
+        
+        return formatted_result
+    except Exception as e:
+        return _handle_error(e)
+```
+
+**日志 URL 格式**:
+```
+{LOGS_BASE_URL}/{nodeManager}:{port}/{containerId}/{attemptId}/{user}/{logType}/?start=0&start.time=0&end.time=9223372036854775807
+```
+
+**设计说明**:
+- 通过多个 API 调用收集构造 URL 所需的信息
+- `start.time=0&end.time=9223372036854775807` 表示获取完整时间范围的日志
+- 日志内容在 HTML 页面的 `<pre>` 标签中
+
+#### 部分日志读取
+
+```python
+@mcp.tool(name="jobhistory_get_task_attempt_logs_partial", ...)
+async def jobhistory_get_task_attempt_logs_partial(params: GetTaskAttemptLogsPartialInput) -> str:
+    """部分读取指定任务尝试的容器日志内容"""
+    # ... 前置步骤相同 ...
+    
+    # 关键区别：使用 start 和 end 参数控制读取范围
+    if params.start < 0:
+        # 负数表示从末尾倒数，不需要 end 参数
+        log_url = f"{base_url}?start={params.start}"
+    else:
+        log_url = f"{base_url}?start={params.start}&end={params.end}"
+```
+
+**字节范围参数**:
+| 参数 | 说明 | 示例 |
+|------|------|------|
+| `start=-4096, end=0` | 读取末尾 4KB | 任务失败分析 |
+| `start=0, end=2048` | 读取开头 2KB | 查看启动日志 |
+| `start=-8192` | 读取末尾 8KB | 更多上下文 |
+
+**设计说明**:
+- 部分读取可以大幅减少数据传输量，节省 Token
+- 负数 `start` 表示从文件末尾倒数，适合快速查看错误信息
+- 默认读取 `syslog` 末尾 4KB，通常包含关键错误信息
 
 ---
 

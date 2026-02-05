@@ -10,6 +10,7 @@
 - 📊 **详细信息**: 获取作业、任务、尝试的完整详情
 - 📈 **计数器查询**: 查看作业和任务的执行统计数据
 - ⚙️ **配置查询**: 获取作业运行时的配置参数
+- 📜 **日志查询**: 获取容器日志内容，支持完整获取和部分读取
 - 🔄 **灵活输出**: 支持 Markdown（人类可读）和 JSON（程序处理）两种格式
 
 ## 部署方式
@@ -111,12 +112,22 @@ pip install -r requirements.txt
 创建 `/app/JobHistoryMcpServer/.env`：
 
 ```bash
+# Hadoop 配置
 JOBHISTORY_URL=http://your-hadoop-cluster:19888/ws/v1/history
+NODEMANAGER_PORT=8052
+REQUEST_TIMEOUT=30.0
+
+# MCP Server 配置
 MCP_TRANSPORT=http
 MCP_HOST=0.0.0.0
 MCP_PORT=8080
+
+# 日志配置
 LOG_LEVEL=INFO
 LOG_FILE=/app/JobHistoryMcpServer/logs/jobhistory_mcp.log
+LOG_MAX_SIZE=268435456
+LOG_BACKUP_COUNT=5
+LOG_TO_STDERR=true
 ```
 
 ##### 4. 创建启动脚本
@@ -226,6 +237,8 @@ curl http://localhost:8080/mcp
 
 ## 可用工具列表
 
+### 作业相关
+
 | 工具名 | 功能描述 |
 |--------|----------|
 | `jobhistory_get_info` | 获取 JobHistory Server 基本信息 |
@@ -234,12 +247,60 @@ curl http://localhost:8080/mcp
 | `jobhistory_get_job_counters` | 获取作业计数器 |
 | `jobhistory_get_job_conf` | 获取作业配置 |
 | `jobhistory_get_job_attempts` | 获取作业 AM 尝试列表 |
+
+### 任务相关
+
+| 工具名 | 功能描述 |
+|--------|----------|
 | `jobhistory_list_tasks` | 列出作业的任务 |
 | `jobhistory_get_task` | 获取任务详情 |
 | `jobhistory_get_task_counters` | 获取任务计数器 |
 | `jobhistory_list_task_attempts` | 列出任务尝试 |
 | `jobhistory_get_task_attempt` | 获取任务尝试详情 |
 | `jobhistory_get_task_attempt_counters` | 获取任务尝试计数器 |
+
+### 日志相关
+
+| 工具名 | 功能描述 |
+|--------|----------|
+| `jobhistory_get_task_attempt_logs` | 获取任务尝试的完整日志内容 |
+| `jobhistory_get_task_attempt_logs_partial` | 部分读取任务尝试日志（按字节范围） |
+
+#### 日志工具使用建议
+
+1. **优先使用部分读取**：`jobhistory_get_task_attempt_logs_partial` 默认读取 syslog 末尾 4KB，通常包含错误信息
+2. **按需调整范围**：如果 4KB 不够，可以通过 `start` 参数调整，如 `start=-8192`（末尾 8KB）
+3. **完整日志兜底**：只有在部分日志无法完成分析时，再使用 `jobhistory_get_task_attempt_logs`
+
+**部分读取参数说明**：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `start` | `-4096` | 起始字节位置，负数从末尾倒数 |
+| `end` | `0` | 结束字节位置，0 表示文件末尾 |
+| `log_type` | `syslog` | 日志类型 |
+
+**常用场景**：
+
+```
+# 读取末尾 4KB（默认，适合任务失败分析）
+start=-4096
+
+# 读取末尾 8KB
+start=-8192
+
+# 读取开头 2KB（查看启动日志）
+start=0, end=2048
+```
+
+**支持的日志类型**：
+- `stdout` - 标准输出
+- `stderr` - 标准错误
+- `syslog` - 系统日志（默认）
+- `syslog.shuffle` - Shuffle 系统日志
+- `prelaunch.out` - 预启动输出
+- `prelaunch.err` - 预启动错误
+- `container-localizer-syslog` - 容器本地化系统日志
 
 ## 使用示例
 
@@ -275,6 +336,25 @@ AI 助手会调用 `jobhistory_get_job` 工具。
 
 AI 助手会依次调用多个工具获取全面信息。
 
+### 示例 5: 查看失败任务的日志
+
+```
+查看作业 job_xxx 失败任务的错误日志
+```
+
+AI 助手会：
+1. 调用 `jobhistory_list_tasks` 找到失败的任务
+2. 调用 `jobhistory_list_task_attempts` 找到失败的尝试
+3. 调用 `jobhistory_get_task_attempt_logs_partial` 读取 syslog 末尾内容分析错误原因
+
+### 示例 6: 获取容器完整日志
+
+```
+获取 attempt_xxx 的完整 stdout 日志
+```
+
+AI 助手会调用 `jobhistory_get_task_attempt_logs` 工具，参数 `log_type="stdout"`。
+
 ## 项目结构
 
 ```
@@ -290,11 +370,25 @@ JobHistoryMcpServer/
     └── LOGGING.md              # 日志配置指南
 ```
 
-## 日志配置
+## 环境变量配置
 
-日志系统记录工具调用和 REST 请求，支持滚动日志。
+### Hadoop 相关
 
-### 环境变量
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `JOBHISTORY_URL` | `http://localhost:19888/ws/v1/history` | JobHistory Server REST API 地址 |
+| `NODEMANAGER_PORT` | `8052` | NodeManager 端口，用于获取容器日志 |
+| `REQUEST_TIMEOUT` | `30.0` | HTTP 请求超时时间（秒） |
+
+### MCP Server 相关
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `MCP_TRANSPORT` | `stdio` | 传输模式：`stdio`（本地）或 `http`（远程） |
+| `MCP_HOST` | `0.0.0.0` | HTTP 模式监听地址 |
+| `MCP_PORT` | `8080` | HTTP 模式监听端口 |
+
+### 日志相关
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
@@ -304,7 +398,11 @@ JobHistoryMcpServer/
 | `LOG_BACKUP_COUNT` | `5` | 保留文件数量 |
 | `LOG_TO_STDERR` | `true` | 是否输出到 stderr |
 
-### 日志示例
+## 日志系统
+
+日志系统记录工具调用和 REST 请求，支持滚动日志。每个请求都有唯一的请求 ID 用于追踪。
+
+### 日志格式示例
 
 ```
 2024-01-15 10:30:45 | INFO  | a1b2c3d4 | [TOOL_CALL] jobhistory_list_jobs, params: {"limit": 10}
