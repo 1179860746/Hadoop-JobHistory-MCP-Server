@@ -15,6 +15,7 @@ JobHistory MCP Server - Hadoop MapReduce 作业历史查询服务
 
 环境变量:
     JOBHISTORY_URL: JobHistory Server 地址，默认 http://localhost:19888/ws/v1/history
+    NODEMANAGER_PORT: NodeManager 端口，用于获取容器日志，默认 8052
     LOG_LEVEL: 日志级别，默认 INFO
     LOG_FILE: 日志文件路径，默认 ./logs/jobhistory_mcp.log
     LOG_MAX_SIZE: 单个日志文件最大大小（字节），默认 268435456 (256MB)
@@ -22,11 +23,12 @@ JobHistory MCP Server - Hadoop MapReduce 作业历史查询服务
     LOG_TO_STDERR: 是否输出到 stderr，默认 true
 
 作者: Winston
-版本: 1.1.0
+版本: 1.3.0
 """
 
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -38,6 +40,7 @@ from enum import Enum
 from datetime import datetime
 from contextvars import ContextVar
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
@@ -131,15 +134,39 @@ logger = setup_logging()
 # JobHistory Server 地址，可通过环境变量配置
 JOBHISTORY_BASE_URL = os.getenv(
     "JOBHISTORY_URL",
-    "http://localhost:19888/ws/v1/history"
+    "https://jobhistory.hellobike.cn/ws/v1/history"
 )
+
+# NodeManager 端口，用于获取容器日志
+NODEMANAGER_PORT = os.getenv("NODEMANAGER_PORT", "8052")
 
 # HTTP 请求超时时间（秒）
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "30.0"))
 
+
+def _get_logs_base_url() -> str:
+    """
+    从 JOBHISTORY_BASE_URL 构造日志服务的基础 URL
+    
+    例如:
+        输入: http://jobhistory.example.com:19888/ws/v1/history
+        输出: http://jobhistory.example.com:19888/jobhistory/logs
+    
+    Returns:
+        日志服务基础 URL
+    """
+    parsed = urlparse(JOBHISTORY_BASE_URL)
+    return f"{parsed.scheme}://{parsed.netloc}/jobhistory/logs"
+
+
+# 日志服务基础 URL
+LOGS_BASE_URL = _get_logs_base_url()
+
 # 启动日志
 logger.info(f"JobHistory MCP Server 初始化")
 logger.info(f"JobHistory URL: {JOBHISTORY_BASE_URL}")
+logger.info(f"Logs Base URL: {LOGS_BASE_URL}")
+logger.info(f"NodeManager Port: {NODEMANAGER_PORT}")
 logger.info(f"请求超时: {REQUEST_TIMEOUT}s")
 
 # ==============================================================================
@@ -309,6 +336,28 @@ class TaskState(str, Enum):
     FAILED = "FAILED"
     KILL_WAIT = "KILL_WAIT"
     KILLED = "KILLED"
+
+
+class LogType(str, Enum):
+    """
+    容器日志类型枚举
+    
+    支持的日志文件类型：
+    - STDOUT: 标准输出
+    - STDERR: 标准错误
+    - SYSLOG: 系统日志
+    - SYSLOG_SHUFFLE: Shuffle 系统日志
+    - PRELAUNCH_OUT: 预启动输出
+    - PRELAUNCH_ERR: 预启动错误
+    - CONTAINER_LOCALIZER_SYSLOG: 容器本地化系统日志
+    """
+    STDOUT = "stdout"
+    STDERR = "stderr"
+    SYSLOG = "syslog"
+    SYSLOG_SHUFFLE = "syslog.shuffle"
+    PRELAUNCH_OUT = "prelaunch.out"
+    PRELAUNCH_ERR = "prelaunch.err"
+    CONTAINER_LOCALIZER_SYSLOG = "container-localizer-syslog"
 
 
 # ==============================================================================
@@ -623,6 +672,103 @@ class GetTaskAttemptCountersInput(BaseInput):
     )
 
 
+class GetTaskAttemptLogsInput(BaseInput):
+    """
+    获取任务尝试日志的输入参数模型（完整获取）
+    
+    用于 jobhistory_get_task_attempt_logs 工具，获取完整的日志内容。
+    注意：大任务可能产生大量日志，建议先使用 partial 工具读取末尾内容。
+    
+    Attributes:
+        job_id: 作业 ID
+        task_id: 任务 ID
+        attempt_id: 尝试 ID
+        log_type: 日志类型
+        response_format: 响应格式
+    """
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    job_id: str = Field(
+        ...,
+        description="作业ID",
+        min_length=1
+    )
+    task_id: str = Field(
+        ...,
+        description="任务ID",
+        min_length=1
+    )
+    attempt_id: str = Field(
+        ...,
+        description="尝试ID，格式如 'attempt_1326381300833_2_2_m_0_0'",
+        min_length=1
+    )
+    log_type: LogType = Field(
+        default=LogType.STDOUT,
+        description="日志类型: stdout, stderr, syslog, syslog.shuffle, prelaunch.out, prelaunch.err, container-localizer-syslog"
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="输出格式"
+    )
+
+
+class GetTaskAttemptLogsPartialInput(BaseInput):
+    """
+    部分读取任务尝试日志的输入参数模型
+    
+    用于 jobhistory_get_task_attempt_logs_partial 工具，按字节范围读取日志。
+    适用于大任务或长期运行任务的日志分析，避免一次性读取全部内容。
+    
+    Attributes:
+        job_id: 作业 ID
+        task_id: 任务 ID
+        attempt_id: 尝试 ID
+        log_type: 日志类型
+        start: 起始字节位置，负数表示从末尾倒数
+        end: 结束字节位置，0 表示文件末尾
+        response_format: 响应格式
+        
+    Examples:
+        - 读取末尾 4KB: start=-4096, end=0
+        - 读取开头 2KB: start=0, end=2048
+        - 读取中间部分: start=1024, end=5120
+    """
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    job_id: str = Field(
+        ...,
+        description="作业ID",
+        min_length=1
+    )
+    task_id: str = Field(
+        ...,
+        description="任务ID",
+        min_length=1
+    )
+    attempt_id: str = Field(
+        ...,
+        description="尝试ID，格式如 'attempt_1326381300833_2_2_m_0_0'",
+        min_length=1
+    )
+    log_type: LogType = Field(
+        default=LogType.SYSLOG,
+        description="日志类型: stdout, stderr, syslog, syslog.shuffle, prelaunch.out, prelaunch.err, container-localizer-syslog"
+    )
+    start: int = Field(
+        default=-4096,
+        description="起始字节位置。正数从文件开头计算，负数从文件末尾倒数。默认 -4096 表示从末尾倒数 4KB 开始"
+    )
+    end: int = Field(
+        default=0,
+        description="结束字节位置。0 表示文件末尾，正数表示具体位置。默认 0 表示读到文件末尾"
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.MARKDOWN,
+        description="输出格式"
+    )
+
+
 # ==============================================================================
 # 工具函数（内部使用）
 # ==============================================================================
@@ -847,6 +993,109 @@ def _format_counters_markdown(counters_data: Dict[str, Any], title: str = "计�
         lines.append("")
     
     return "\n".join(lines)
+
+
+def _extract_hostname(node_http_address: str) -> str:
+    """
+    从 nodeHttpAddress 提取主机名
+    
+    Args:
+        node_http_address: 节点 HTTP 地址，格式如 "hostname:port"
+        
+    Returns:
+        主机名部分
+        
+    Example:
+        输入: pro-hadooptemporary-dc01-085025.vm.dc01.hellocloud.tech:8042
+        输出: pro-hadooptemporary-dc01-085025.vm.dc01.hellocloud.tech
+    """
+    if ':' in node_http_address:
+        return node_http_address.rsplit(':', 1)[0]
+    return node_http_address
+
+
+async def _fetch_logs_html(url: str) -> str:
+    """
+    获取日志 HTML 内容
+    
+    发送 HTTP GET 请求获取日志页面的 HTML 内容。
+    
+    Args:
+        url: 日志 URL
+        
+    Returns:
+        HTML 内容字符串
+        
+    Raises:
+        httpx.HTTPStatusError: HTTP 错误状态码
+        httpx.TimeoutException: 请求超时
+        httpx.ConnectError: 连接失败
+    """
+    logger.info(f"[REST_REQ] GET {url}")
+    start_time = time.time()
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                url,
+                timeout=REQUEST_TIMEOUT,
+                headers={"Accept": "text/html"},
+                follow_redirects=True
+            )
+            
+            duration_ms = (time.time() - start_time) * 1000
+            logger.info(
+                f"[REST_RSP] {response.status_code} {response.reason_phrase}, "
+                f"size: {len(response.content)} bytes, duration: {duration_ms:.2f}ms"
+            )
+            
+            response.raise_for_status()
+            return response.text
+            
+    except httpx.HTTPStatusError as e:
+        duration_ms = (time.time() - start_time) * 1000
+        logger.warning(
+            f"[REST_ERR] HTTP {e.response.status_code}, "
+            f"duration: {duration_ms:.2f}ms"
+        )
+        raise
+    except httpx.TimeoutException:
+        duration_ms = (time.time() - start_time) * 1000
+        logger.warning(f"[REST_ERR] Timeout after {duration_ms:.2f}ms")
+        raise
+    except httpx.ConnectError as e:
+        duration_ms = (time.time() - start_time) * 1000
+        logger.warning(f"[REST_ERR] Connection failed: {e}, duration: {duration_ms:.2f}ms")
+        raise
+    except Exception as e:
+        duration_ms = (time.time() - start_time) * 1000
+        logger.error(f"[REST_ERR] {type(e).__name__}: {e}, duration: {duration_ms:.2f}ms")
+        raise
+
+
+def _extract_pre_content(html: str) -> str:
+    """
+    从 HTML 中提取 <pre> 标签的内容
+    
+    Args:
+        html: HTML 内容字符串
+        
+    Returns:
+        <pre> 标签中的文本内容，如果未找到则返回空字符串
+    """
+    # 使用正则匹配 <pre>...</pre> 内容
+    match = re.search(r'<pre[^>]*>(.*?)</pre>', html, re.DOTALL | re.IGNORECASE)
+    if match:
+        content = match.group(1)
+        # 处理 HTML 实体
+        content = content.replace('&lt;', '<')
+        content = content.replace('&gt;', '>')
+        content = content.replace('&amp;', '&')
+        content = content.replace('&quot;', '"')
+        content = content.replace('&#39;', "'")
+        content = content.replace('&nbsp;', ' ')
+        return content.strip()
+    return ""
 
 
 # ==============================================================================
@@ -1703,6 +1952,281 @@ async def jobhistory_get_task_attempt_counters(params: GetTaskAttemptCountersInp
             counters,
             f"任务尝试计数器: {attempt_id}"
         )
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="jobhistory_get_task_attempt_logs",
+    annotations={
+        "title": "获取任务尝试日志",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+@log_tool_call
+async def jobhistory_get_task_attempt_logs(params: GetTaskAttemptLogsInput) -> str:
+    """
+    获取指定任务尝试的容器日志内容。
+    
+    该工具通过以下步骤获取日志：
+    1. 查询任务尝试信息获取容器 ID 和节点地址
+    2. 查询作业信息获取用户名
+    3. 构造日志 URL 并获取日志内容
+    
+    支持的日志类型包括：
+    - stdout: 标准输出（默认）
+    - stderr: 标准错误
+    - syslog: 系统日志
+    - syslog.shuffle: Shuffle 系统日志
+    - prelaunch.out: 预启动输出
+    - prelaunch.err: 预启动错误
+    - container-localizer-syslog: 容器本地化系统日志
+    
+    Args:
+        params (GetTaskAttemptLogsInput): 包含 job_id, task_id, attempt_id 和 log_type
+    
+    Returns:
+        str: 日志内容，Markdown 或 JSON 格式
+        
+    Examples:
+        - 获取 stdout 日志: job_id="job_xxx", task_id="task_xxx", attempt_id="attempt_xxx"
+        - 获取 stderr 日志: job_id="job_xxx", task_id="task_xxx", attempt_id="attempt_xxx", log_type="stderr"
+    """
+    try:
+        # 1. 获取任务尝试信息
+        attempt_data = await _make_request(
+            f"mapreduce/jobs/{params.job_id}/tasks/{params.task_id}/attempts/{params.attempt_id}"
+        )
+        attempt = attempt_data.get("taskAttempt", {})
+        
+        container_id = attempt.get("assignedContainerId")
+        node_http_address = attempt.get("nodeHttpAddress")
+        
+        if not container_id:
+            return "错误：无法获取容器 ID 信息。请检查 attempt_id 是否正确。"
+        if not node_http_address:
+            return "错误：无法获取节点地址信息。请检查 attempt_id 是否正确。"
+        
+        # 2. 获取作业信息以获取用户名
+        job_data = await _make_request(f"mapreduce/jobs/{params.job_id}")
+        job = job_data.get("job", {})
+        user = job.get("user")
+        
+        if not user:
+            return "错误：无法获取作业用户信息。请检查 job_id 是否正确。"
+        
+        # 3. 构造 NodeManager 地址
+        hostname = _extract_hostname(node_http_address)
+        node_manager = f"{hostname}:{NODEMANAGER_PORT}"
+        
+        # 4. 构造日志 URL
+        log_url = (
+            f"{LOGS_BASE_URL}/{node_manager}/{container_id}/"
+            f"{params.attempt_id}/{user}/{params.log_type.value}/"
+            f"?start=0&start.time=0&end.time=9223372036854775807"
+        )
+        
+        logger.info(f"获取日志 URL: {log_url}")
+        
+        # 5. 获取日志 HTML
+        html_content = await _fetch_logs_html(log_url)
+        
+        # 6. 提取 <pre> 标签中的日志内容
+        log_content = _extract_pre_content(html_content)
+        
+        if not log_content:
+            return f"日志为空或无法解析日志内容。\n\n**日志 URL**: {log_url}"
+        
+        # 7. 格式化输出
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps({
+                "job_id": params.job_id,
+                "task_id": params.task_id,
+                "attempt_id": params.attempt_id,
+                "container_id": container_id,
+                "node_manager": node_manager,
+                "user": user,
+                "log_type": params.log_type.value,
+                "log_url": log_url,
+                "content": log_content
+            }, indent=2, ensure_ascii=False)
+        
+        # Markdown 格式输出
+        lines = [
+            f"# 任务尝试日志: {params.log_type.value}",
+            "",
+            "## 日志信息",
+            f"| 属性 | 值 |",
+            f"|------|-----|",
+            f"| 作业 ID | `{params.job_id}` |",
+            f"| 任务 ID | `{params.task_id}` |",
+            f"| 尝试 ID | `{params.attempt_id}` |",
+            f"| 容器 ID | `{container_id}` |",
+            f"| 节点 | {node_manager} |",
+            f"| 用户 | {user} |",
+            f"| 日志类型 | {params.log_type.value} |",
+            "",
+            "## 日志内容",
+            "```",
+            log_content,
+            "```"
+        ]
+        
+        return "\n".join(lines)
+        
+    except Exception as e:
+        return _handle_error(e)
+
+
+@mcp.tool(
+    name="jobhistory_get_task_attempt_logs_partial",
+    annotations={
+        "title": "部分读取任务尝试日志",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+@log_tool_call
+async def jobhistory_get_task_attempt_logs_partial(params: GetTaskAttemptLogsPartialInput) -> str:
+    """
+    部分读取指定任务尝试的容器日志内容。
+    
+    该工具按字节范围读取日志，适用于：
+    - 大任务或长期运行任务产生的大量日志
+    - 快速查看日志末尾的错误信息（任务失败分析）
+    - 节省 Token 消耗，避免一次性读取全部内容
+    
+    字节范围参数说明：
+    - start: 起始字节位置
+      - 正数: 从文件开头计算（0 表示第一个字节）
+      - 负数: 从文件末尾倒数（-4096 表示倒数 4096 字节）
+    - end: 结束字节位置
+      - 正数: 具体字节位置
+      - 0: 表示文件末尾
+    
+    常用场景：
+    - 任务失败分析: start=-4096, end=0 (读取末尾 4KB，通常包含错误信息)
+    - 查看启动日志: start=0, end=2048 (读取开头 2KB)
+    - 读取中间部分: start=10240, end=20480 (读取 10KB-20KB 范围)
+    
+    如果部分日志无法完成分析，请使用 jobhistory_get_task_attempt_logs 获取完整日志。
+    
+    Args:
+        params (GetTaskAttemptLogsPartialInput): 包含 job_id, task_id, attempt_id, log_type, start, end
+    
+    Returns:
+        str: 部分日志内容，Markdown 或 JSON 格式
+        
+    Examples:
+        - 读取 syslog 末尾 4KB: job_id="job_xxx", task_id="task_xxx", attempt_id="attempt_xxx", log_type="syslog"
+        - 读取 stderr 末尾 8KB: job_id="job_xxx", ..., log_type="stderr", start=-8192, end=0
+        - 读取 stdout 开头 2KB: job_id="job_xxx", ..., log_type="stdout", start=0, end=2048
+    """
+    try:
+        # 1. 获取任务尝试信息
+        attempt_data = await _make_request(
+            f"mapreduce/jobs/{params.job_id}/tasks/{params.task_id}/attempts/{params.attempt_id}"
+        )
+        attempt = attempt_data.get("taskAttempt", {})
+        
+        container_id = attempt.get("assignedContainerId")
+        node_http_address = attempt.get("nodeHttpAddress")
+        
+        if not container_id:
+            return "错误：无法获取容器 ID 信息。请检查 attempt_id 是否正确。"
+        if not node_http_address:
+            return "错误：无法获取节点地址信息。请检查 attempt_id 是否正确。"
+        
+        # 2. 获取作业信息以获取用户名
+        job_data = await _make_request(f"mapreduce/jobs/{params.job_id}")
+        job = job_data.get("job", {})
+        user = job.get("user")
+        
+        if not user:
+            return "错误：无法获取作业用户信息。请检查 job_id 是否正确。"
+        
+        # 3. 构造 NodeManager 地址
+        hostname = _extract_hostname(node_http_address)
+        node_manager = f"{hostname}:{NODEMANAGER_PORT}"
+        
+        # 4. 构造日志 URL（使用 start 和 end 参数）
+        log_url = (
+            f"{LOGS_BASE_URL}/{node_manager}/{container_id}/"
+            f"{params.attempt_id}/{user}/{params.log_type.value}/"
+            f"?start={params.start}&end={params.end}"
+        )
+        
+        logger.info(f"获取部分日志 URL: {log_url}")
+        
+        # 5. 获取日志 HTML
+        html_content = await _fetch_logs_html(log_url)
+        
+        # 6. 提取 <pre> 标签中的日志内容
+        log_content = _extract_pre_content(html_content)
+        
+        if not log_content:
+            return f"日志为空或无法解析日志内容。\n\n**日志 URL**: {log_url}"
+        
+        # 计算读取范围描述
+        if params.start < 0:
+            range_desc = f"末尾 {abs(params.start)} 字节"
+        elif params.end == 0:
+            range_desc = f"从 {params.start} 字节到末尾"
+        else:
+            range_desc = f"{params.start} - {params.end} 字节"
+        
+        # 7. 格式化输出
+        if params.response_format == ResponseFormat.JSON:
+            return json.dumps({
+                "job_id": params.job_id,
+                "task_id": params.task_id,
+                "attempt_id": params.attempt_id,
+                "container_id": container_id,
+                "node_manager": node_manager,
+                "user": user,
+                "log_type": params.log_type.value,
+                "byte_range": {
+                    "start": params.start,
+                    "end": params.end,
+                    "description": range_desc
+                },
+                "log_url": log_url,
+                "content_length": len(log_content),
+                "content": log_content
+            }, indent=2, ensure_ascii=False)
+        
+        # Markdown 格式输出
+        lines = [
+            f"# 任务尝试日志（部分）: {params.log_type.value}",
+            "",
+            "## 日志信息",
+            f"| 属性 | 值 |",
+            f"|------|-----|",
+            f"| 作业 ID | `{params.job_id}` |",
+            f"| 任务 ID | `{params.task_id}` |",
+            f"| 尝试 ID | `{params.attempt_id}` |",
+            f"| 容器 ID | `{container_id}` |",
+            f"| 节点 | {node_manager} |",
+            f"| 用户 | {user} |",
+            f"| 日志类型 | {params.log_type.value} |",
+            f"| 读取范围 | {range_desc} |",
+            f"| 内容长度 | {len(log_content)} 字节 |",
+            "",
+            "## 日志内容",
+            "```",
+            log_content,
+            "```",
+            "",
+            f"*提示：如需完整日志，请使用 `jobhistory_get_task_attempt_logs` 工具*"
+        ]
+        
+        return "\n".join(lines)
+        
     except Exception as e:
         return _handle_error(e)
 
