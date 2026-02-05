@@ -1,0 +1,15 @@
+[Unit]
+Description=JobHistory MCP Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/app/JobHistoryMcpServer
+EnvironmentFile=/app/JobHistoryMcpServer/.env
+ExecStart=/app/JobHistoryMcpServer/start.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
