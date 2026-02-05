@@ -40,7 +40,7 @@ from contextvars import ContextVar
 from pathlib import Path
 
 import httpx
-from pydantic import BaseModel, Field, ConfigDict, field_validator
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 from fastmcp import FastMCP
 
 # ==============================================================================
@@ -316,7 +316,41 @@ class TaskState(str, Enum):
 # ==============================================================================
 
 
-class ListJobsInput(BaseModel):
+class BaseInput(BaseModel):
+    """
+    支持 JSON 字符串输入的基础输入模型
+    
+    用于兼容某些 MCP 客户端（如 Cherry Studio）的参数序列化 bug，
+    这些客户端会将参数对象序列化为 JSON 字符串而不是直接传递对象。
+    """
+    
+    @model_validator(mode='before')
+    @classmethod
+    def parse_json_string(cls, data):
+        """
+        在验证之前预处理输入数据
+        
+        如果输入是 JSON 字符串，先解析为字典。
+        这解决了某些 MCP 客户端将参数双重序列化的问题。
+        
+        Args:
+            data: 原始输入数据
+            
+        Returns:
+            处理后的数据（字典或原始数据）
+        """
+        if isinstance(data, str):
+            try:
+                parsed = json.loads(data)
+                logger.debug(f"参数从 JSON 字符串解析: {data[:100]}...")
+                return parsed
+            except json.JSONDecodeError:
+                # 如果不是有效的 JSON，保持原样让后续验证处理
+                pass
+        return data
+
+
+class ListJobsInput(BaseInput):
     """
     列出作业的输入参数模型
     
@@ -382,7 +416,7 @@ class ListJobsInput(BaseModel):
     )
 
 
-class GetJobInput(BaseModel):
+class GetJobInput(BaseInput):
     """
     获取作业详情的输入参数模型
     
@@ -414,7 +448,7 @@ class GetJobInput(BaseModel):
         return v.strip()
 
 
-class GetJobCountersInput(BaseModel):
+class GetJobCountersInput(BaseInput):
     """
     获取作业计数器的输入参数模型
     
@@ -433,7 +467,7 @@ class GetJobCountersInput(BaseModel):
     )
 
 
-class GetJobConfInput(BaseModel):
+class GetJobConfInput(BaseInput):
     """
     获取作业配置的输入参数模型
     
@@ -456,7 +490,7 @@ class GetJobConfInput(BaseModel):
     )
 
 
-class GetJobAttemptsInput(BaseModel):
+class GetJobAttemptsInput(BaseInput):
     """
     获取作业尝试列表的输入参数模型
     
@@ -475,7 +509,7 @@ class GetJobAttemptsInput(BaseModel):
     )
 
 
-class ListTasksInput(BaseModel):
+class ListTasksInput(BaseInput):
     """
     列出任务的输入参数模型
     
@@ -503,7 +537,7 @@ class ListTasksInput(BaseModel):
     )
 
 
-class GetTaskInput(BaseModel):
+class GetTaskInput(BaseInput):
     """
     获取任务详情的输入参数模型
     
@@ -527,7 +561,7 @@ class GetTaskInput(BaseModel):
     )
 
 
-class GetTaskCountersInput(BaseModel):
+class GetTaskCountersInput(BaseInput):
     """
     获取任务计数器的输入参数模型
     """
@@ -541,7 +575,7 @@ class GetTaskCountersInput(BaseModel):
     )
 
 
-class ListTaskAttemptsInput(BaseModel):
+class ListTaskAttemptsInput(BaseInput):
     """
     列出任务尝试的输入参数模型
     """
@@ -555,7 +589,7 @@ class ListTaskAttemptsInput(BaseModel):
     )
 
 
-class GetTaskAttemptInput(BaseModel):
+class GetTaskAttemptInput(BaseInput):
     """
     获取任务尝试详情的输入参数模型
     """
@@ -574,7 +608,7 @@ class GetTaskAttemptInput(BaseModel):
     )
 
 
-class GetTaskAttemptCountersInput(BaseModel):
+class GetTaskAttemptCountersInput(BaseInput):
     """
     获取任务尝试计数器的输入参数模型
     """

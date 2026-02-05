@@ -116,7 +116,7 @@ MCP_TRANSPORT=http
 MCP_HOST=0.0.0.0
 MCP_PORT=8080
 LOG_LEVEL=INFO
-LOG_FILE=/app/JobHistoryMcpServer/jobhistory_mcp.log
+LOG_FILE=/app/JobHistoryMcpServer/logs/jobhistory_mcp.log
 ```
 
 ##### 4. 创建启动脚本
@@ -318,10 +318,8 @@ JobHistoryMcpServer/
 ## 文档
 
 - [REST API 文档](docs/REST_API.md) - JobHistory Server REST API 完整说明
-- [MCP 使用说明](docs/MCP_USAGE.md) - MCP Server 配置和使用指南
 - [代码详解](docs/CODE_EXPLANATION.md) - 代码结构和实现说明
 - [日志配置指南](docs/LOGGING.md) - 日志功能和配置说明
-- [远程部署指南](docs/REMOTE_DEPLOYMENT.md) - 远程服务器部署和连接说明
 
 ## 依赖
 
