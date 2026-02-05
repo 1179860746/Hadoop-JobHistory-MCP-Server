@@ -2155,11 +2155,19 @@ async def jobhistory_get_task_attempt_logs_partial(params: GetTaskAttemptLogsPar
         node_manager = f"{hostname}:{NODEMANAGER_PORT}"
         
         # 4. 构造日志 URL（使用 start 和 end 参数）
-        log_url = (
-            f"{LOGS_BASE_URL}/{node_manager}/{container_id}/"
-            f"{params.attempt_id}/{user}/{params.log_type.value}/"
-            f"?start={params.start}&end={params.end}"
-        )
+        # 当 start 为负数时，表示从末尾倒数，不需要 end 参数
+        if params.start < 0:
+            log_url = (
+                f"{LOGS_BASE_URL}/{node_manager}/{container_id}/"
+                f"{params.attempt_id}/{user}/{params.log_type.value}/"
+                f"?start={params.start}"
+            )
+        else:
+            log_url = (
+                f"{LOGS_BASE_URL}/{node_manager}/{container_id}/"
+                f"{params.attempt_id}/{user}/{params.log_type.value}/"
+                f"?start={params.start}&end={params.end}"
+            )
         
         logger.info(f"获取部分日志 URL: {log_url}")
         
